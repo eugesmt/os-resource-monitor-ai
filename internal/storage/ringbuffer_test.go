@@ -1,0 +1,42 @@
+package storage
+
+import (
+	"sync"
+	"testing"
+	"time"
+
+	"taskmanager-ai/internal/collector"
+)
+
+func snapshot(ts int64) collector.SystemSnapshot {
+	return collector.SystemSnapshot{Timestamp: time.Unix(ts, 0), CPUPercent: float64(ts)}
+}
+
+func TestRingBufferOverflowAndOrder(t *testing.T) {
+	r := NewRingBuffer(3)
+	r.Add(snapshot(1))
+	r.Add(snapshot(2))
+	r.Add(snapshot(3))
+	r.Add(snapshot(4))
+
+	got := r.GetAll()
+	if len(got) != 3 || got[0].CPUPercent != 2 || got[1].CPUPercent != 3 || got[2].CPUPercent != 4 {
+		t.Fatalf("unexpected order: %+v", got)
+	}
+}
+
+func TestRingBufferConcurrentAccess(t *testing.T) {
+	r := NewRingBuffer(50)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				r.Add(snapshot(int64(offset*1000 + j)))
+				_ = r.GetLast(10)
+			}
+		}(i)
+	}
+	wg.Wait()
+}

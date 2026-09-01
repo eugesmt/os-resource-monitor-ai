@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>Task Manager AI</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <div class="brand">Task Manager <span>AI</span></div>
+        <div class="subtitle">Локальный мониторинг системы и AI-анализ</div>
+      </div>
+      <div id="status" class="status"><span class="status-dot pending"></span><span>Подключение…</span></div>
+    </header>
+
+    <section class="metrics-grid" aria-label="Основные показатели">
+      <article class="card metric-card">
+        <div class="metric-label">CPU</div>
+        <div id="cpu" class="metric-value">—</div>
+        <div id="cpuSub" class="metric-sub">Ожидание данных</div>
+      </article>
+      <article class="card metric-card">
+        <div class="metric-label">Память</div>
+        <div id="memory" class="metric-value">—</div>
+        <div id="memorySub" class="metric-sub">Ожидание данных</div>
+      </article>
+      <article class="card metric-card">
+        <div class="metric-label">Сеть ↓</div>
+        <div id="recv" class="metric-value">—</div>
+        <div id="sendSub" class="metric-sub">↑ —</div>
+      </article>
+      <article class="card metric-card">
+        <div class="metric-label">Disk I/O</div>
+        <div id="diskRead" class="metric-value">—</div>
+        <div id="diskWrite" class="metric-sub">↑ —</div>
+      </article>
+      <article class="card metric-card">
+        <div class="metric-label">История</div>
+        <div id="historyCount" class="metric-value">0</div>
+        <div class="metric-sub">снимков в памяти</div>
+      </article>
+    </section>
+
+    <section class="card panel chart-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Нагрузка</h2>
+          <div class="legend">
+            <span><i class="legend-swatch cpu"></i>CPU</span>
+            <span><i class="legend-swatch mem"></i>Memory</span>
+          </div>
+        </div>
+        <div id="updatedAt" class="updated-at">—</div>
+      </div>
+      <div class="chart-wrap">
+        <svg id="chart" class="chart" role="img" aria-label="График загрузки CPU и памяти"></svg>
+        <div id="chartEmpty" class="chart-empty">Собираем историю…</div>
+      </div>
+    </section>
+
+    <section class="card panel">
+      <div class="panel-head">
+        <h2>Процессы</h2>
+        <div class="panel-hint">Top 100 по CPU</div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>PID</th><th>Процесс</th><th class="num">CPU</th><th class="num">RAM</th></tr>
+          </thead>
+          <tbody id="processes">
+            <tr><td colspan="4" class="table-empty">Сбор списка процессов…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card panel ai-panel">
+      <div class="panel-head">
+        <div>
+          <h2>AI Assistant</h2>
+          <div class="panel-hint">DeepSeek анализирует текущие системные метрики</div>
+        </div>
+      </div>
+      <div id="chat" class="chat" aria-live="polite">
+        <div class="message ai">Привет. Я вижу текущие метрики этой машины. Например, спроси: «Почему сейчас высокая загрузка CPU?»</div>
+      </div>
+      <form id="askForm" class="ask-form">
+        <textarea id="question" maxlength="4000" rows="2" placeholder="Задайте вопрос о состоянии системы…"></textarea>
+        <button id="sendBtn" type="submit">Спросить</button>
+      </form>
+      <div id="aiError" class="error" role="alert"></div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
