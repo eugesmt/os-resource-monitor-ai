@@ -12,53 +12,30 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 )
 
-type JSONSchema map[string]any
-
-func (s JSONSchema) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]any(s))
-}
-
-var schema = JSONSchema{
-	"type": "object",
-	"properties": map[string]any{
-		"summary": map[string]any{
-			"type": "string",
-		},
-		"facts": map[string]any{
-			"type": "array",
-			"items": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"metric": map[string]any{
-						"type": "string",
-					},
-					"value": map[string]any{
-						"type": "number",
-					},
-					"unit": map[string]any{
-						"type": "string",
-					},
-				},
-				"required":             []string{"metric", "value"},
-				"additionalProperties": false,
-			},
-		},
-		"recommendations": map[string]any{
-			"type":  "array",
-			"items": map[string]any{"type": "string"},
-		},
-	},
-	"required":             []string{"summary", "facts", "recommendations"},
-	"additionalProperties": false,
-}
-
 const systemPrompt = `Ты AI-ассистент системного диспетчера задач.
+
 Анализируй только предоставленные системные метрики.
 Не выдумывай значения, которых нет в контексте.
 Отделяй факты от предположений.
 Давай краткие, практичные и понятные рекомендации.
-После формирования полного ответа немедленно заверши генерацию.
-Не добавляй никакого текста после завершения ответа.`
+
+Верни результат строго в JSON следующего формата:
+{
+  "summary": "string",
+  "facts": [
+    {
+      "metric": "string",
+      "value": 0,
+      "unit": "string"
+    }
+  ],
+  "recommendations": [
+    "string"
+  ]
+}
+
+Не добавляй markdown, пояснения или текст вне JSON.
+После формирования полного JSON немедленно заверши ответ.`
 
 type Client struct {
 	client *openai.Client
@@ -123,13 +100,7 @@ func (c *Client) Ask(ctx context.Context, question, contextText string) (*domain
 		MaxCompletionTokens: 500,
 
 		ResponseFormat: &openai.ChatCompletionResponseFormat{
-			Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
-			JSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
-				Name:        "system_metrics_analysis",
-				Description: "Анализ системных метрик",
-				Schema:      schema,
-				Strict:      true,
-			},
+			Type: openai.ChatCompletionResponseFormatTypeJSONObject,
 		},
 	})
 
