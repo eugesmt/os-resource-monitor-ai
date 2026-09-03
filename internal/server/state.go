@@ -101,7 +101,10 @@ func (s *State) AskAI(ctx context.Context, question string) (string, error) {
 	if !ready {
 		return "", ErrSnapshotNotReady
 	}
-	return client.Ask(ctx, question, ai.BuildContext(snapshot, s.buffer.GetLast(10)))
+
+	contextText := ai.BuildContext(snapshot, s.buffer.GetLast(10))
+
+	return client.Ask(ctx, question, contextText)
 }
 
 func (s *State) Subscribe() (<-chan collector.SystemSnapshot, func()) {

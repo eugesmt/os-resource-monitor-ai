@@ -10,11 +10,32 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 )
 
-const systemPrompt = `Ты AI-ассистент системного диспетчера задач.
-Анализируй только предоставленные системные метрики.
-Не выдумывай значения, которых нет в контексте.
-Отделяй факты от предположений.
-Давай краткие, практичные и понятные рекомендации.`
+const contextTextMock = `SYSTEM STATE
+
+Current CPU: 1.8%
+Memory: 9.51 GB / 15.71 GB (60.0%)
+
+Disks:
+- C: (C:): 308.97 GB used / 458.49 GB total
+- D: (D:): 255.25 GB used / 953.85 GB total
+
+Disk I/O: read 0.03 MB/s, write 0.14 MB/s
+Network: receive 0.35 KB/s, send 0.36 KB/s
+
+Top 5 processes by CPU:
+1. brave.exe (PID 18776): CPU 15.0%, MEM 1.5%
+2. brave.exe (PID 16304): CPU 13.2%, MEM 2.4%
+3. Code.exe (PID 13076): CPU 10.0%, MEM 2.5%
+4. brave.exe (PID 23036): CPU 8.9%, MEM 1.0%
+5. go.exe (PID 5048): CPU 7.6%, MEM 0.2%
+
+Change vs previous snapshot: CPU +0.5 pp, Memory +0.0 pp
+
+History over last 10 snapshots:
+CPU: avg 5.7%, min 1.3%, max 11.1%
+Memory: avg 60.0%, min 60.0%, max 60.0%`
+
+const systemPrompt = `Ты AI-ассистент`
 
 type Client struct {
 	client *openai.Client
@@ -56,7 +77,7 @@ func (c *Client) Ask(ctx context.Context, question, contextText string) (string,
 	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	userContent := fmt.Sprintf("SYSTEM CONTEXT:\n%s\n\nUSER QUESTION:\n%s", contextText, question)
+	userContent := fmt.Sprintf("SYSTEM CONTEXT:\n%s\n\nUSER QUESTION:\n%s", contextTextMock, question)
 	resp, err := c.client.CreateChatCompletion(requestCtx, openai.ChatCompletionRequest{
 		Model: c.model,
 		Messages: []openai.ChatCompletionMessage{

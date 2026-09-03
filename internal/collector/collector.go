@@ -87,9 +87,7 @@ func (c *Collector) Start(ctx context.Context, interval time.Duration, callback 
 		interval = 2 * time.Second
 	}
 
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
+	c.wg.Go(func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -113,7 +111,7 @@ func (c *Collector) Start(ctx context.Context, interval time.Duration, callback 
 				return
 			}
 		}
-	}()
+	})
 }
 
 func collectDisks() ([]DiskInfo, error) {
