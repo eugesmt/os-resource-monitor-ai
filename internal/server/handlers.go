@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"taskmanager-ai/internal/collector"
+	"taskmanager-ai/internal/domain"
 )
 
 type apiError struct {
@@ -23,7 +25,7 @@ type aiRequest struct {
 	Question string `json:"question"`
 }
 type aiResponse struct {
-	Answer string `json:"answer"`
+	Answer *domain.AnalysisResponse `json:"answer"`
 }
 type historyResponse struct {
 	Items []collector.SystemSnapshot `json:"items"`
@@ -95,6 +97,7 @@ func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
 			writeAPIError(w, status, err)
 			return
 		}
+		fmt.Println(aiResponse{Answer: answer})
 		writeJSON(w, 200, aiResponse{Answer: answer})
 	})
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {

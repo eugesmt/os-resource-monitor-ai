@@ -9,6 +9,7 @@ import (
 
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
+	"taskmanager-ai/internal/domain"
 	"taskmanager-ai/internal/storage"
 )
 
@@ -89,18 +90,19 @@ func (s *State) GetHistory(limit int) []collector.SystemSnapshot {
 	}
 	return s.buffer.GetLast(limit)
 }
-func (s *State) AskAI(ctx context.Context, question string) (string, error) {
+func (s *State) AskAI(ctx context.Context, question string) (*domain.AnalysisResponse, error) {
 	s.mu.RLock()
 	client := s.aiClient
 	snapshot := cloneSnapshot(s.snapshot)
 	ready := s.hasSnapshot
 	s.mu.RUnlock()
 	if client == nil {
-		return "", ErrAIUnavailable
+		return nil, ErrAIUnavailable
 	}
 	if !ready {
-		return "", ErrSnapshotNotReady
+		return nil, ErrSnapshotNotReady
 	}
+
 	return client.Ask(ctx, question, ai.BuildContext(snapshot, s.buffer.GetLast(10)))
 }
 
