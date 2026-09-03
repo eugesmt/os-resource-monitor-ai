@@ -35,7 +35,9 @@ History over last 10 snapshots:
 CPU: avg 5.7%, min 1.3%, max 11.1%
 Memory: avg 60.0%, min 60.0%, max 60.0%`
 
-const systemPrompt = `Ты AI-ассистент`
+const systemPrompt = `Ты AI-ассистент.
+
+Решай задачу пошагово.`
 
 type Client struct {
 	client *openai.Client
