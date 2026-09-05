@@ -94,7 +94,7 @@ func (c *Client) Ask(ctx context.Context, question, contextText string) (string,
 			{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
 			{Role: openai.ChatMessageRoleUser, Content: userContent},
 		},
-		Temperature: 0.7,
+		Temperature: 1.2,
 	})
 	if err != nil {
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
