@@ -13,7 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
+	"taskmanager-ai/internal/domain"
 )
 
 type apiError struct {
@@ -23,7 +25,7 @@ type aiRequest struct {
 	Question string `json:"question"`
 }
 type aiResponse struct {
-	Answer string `json:"answer"`
+	Answer *domain.AnalysisResponse `json:"answer"`
 }
 type historyResponse struct {
 	Items []collector.SystemSnapshot `json:"items"`
@@ -78,21 +80,20 @@ func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
 			writeAPIError(w, 400, errors.New("question is empty"))
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 31*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), ai.RequestTimeout)
 		defer cancel()
 		answer, err := state.AskAI(ctx, req.Question)
 		if err != nil {
 			status := 502
-			if errors.Is(err, context.DeadlineExceeded) {
+			publicErr := errors.New("AI service temporarily unavailable")
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ai.ErrTimeout) {
 				status = 504
-			}
-			if errors.Is(err, ErrAIUnavailable) {
+				publicErr = errors.New("AI service timed out")
+			} else if errors.Is(err, ErrAIUnavailable) || errors.Is(err, ErrSnapshotNotReady) || errors.Is(err, ai.ErrPromptNotConfigured) {
 				status = 503
 			}
-			if errors.Is(err, ErrSnapshotNotReady) {
-				status = 503
-			}
-			writeAPIError(w, status, err)
+			state.log.Error("AI request failed", "error", err)
+			writeAPIError(w, status, publicErr)
 			return
 		}
 		writeJSON(w, 200, aiResponse{Answer: answer})

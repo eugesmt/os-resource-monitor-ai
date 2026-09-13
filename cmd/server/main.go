@@ -33,6 +33,7 @@ type Config struct {
 	AIModel           string
 	AIBaseURL         string
 	AIAPIKey          string
+	AIPrompt          string
 }
 
 func loadConfig() Config {
@@ -50,6 +51,7 @@ func loadConfig() Config {
 		AIModel:           envOrDefault("DEEPSEEK_MODEL", "deepseek-v4-flash"),
 		AIBaseURL:         envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 		AIAPIKey:          strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
+		AIPrompt:          strings.TrimSpace(os.Getenv("AI_SYSTEM_PROMPT")),
 	}
 }
 func envInt(key string, fallback int) int {
@@ -79,7 +81,7 @@ func main() {
 	c := collector.New(cfg.MaxProcesses, logger)
 	state := server.NewState(c, storage.NewRingBuffer(cfg.HistorySize), logger)
 	if cfg.AIAPIKey != "" {
-		state.SetAIClient(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel))
+		state.SetAIAgent(ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), cfg.AIPrompt))
 	}
 	state.Start(ctx, cfg.CollectorInterval)
 	defer state.Stop()

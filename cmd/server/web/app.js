@@ -170,6 +170,47 @@ function subscribe() {
   events.onerror = () => setStatus('bad', 'Переподключение…');
 }
 
+function formatAIAnswer(answer) {
+  if (!answer || typeof answer !== 'object') {
+    return 'Пустой ответ от AI';
+  }
+
+  const parts = [];
+
+  if (answer.summary) {
+    parts.push(answer.summary);
+  }
+
+  if (Array.isArray(answer.facts) && answer.facts.length > 0) {
+    parts.push(
+      'Факты:\n' +
+      answer.facts
+        .map((fact) => {
+          const metric = fact.metric ?? '';
+          const value = fact.value ?? '';
+          const unit = fact.unit ?? '';
+
+          return `• ${metric}: ${value}${unit ? ` ${unit}` : ''}`;
+        })
+        .join('\n')
+    );
+  }
+
+  if (
+    Array.isArray(answer.recommendations) &&
+    answer.recommendations.length > 0
+  ) {
+    parts.push(
+      'Рекомендации:\n' +
+      answer.recommendations
+        .map((recommendation) => `• ${recommendation}`)
+        .join('\n')
+    );
+  }
+
+  return parts.join('\n\n') || 'Пустой ответ от AI';
+}
+
 $('askForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (aiBusy) return;
@@ -189,7 +230,7 @@ $('askForm').addEventListener('submit', async (event) => {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'AI request failed');
-    addMessage('ai', payload.answer || 'Пустой ответ от AI');
+    addMessage('ai', formatAIAnswer(payload.answer));
   } catch (error) {
     $('aiError').textContent = error instanceof Error ? error.message : 'Не удалось получить ответ AI';
   } finally {

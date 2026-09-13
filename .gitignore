@@ -5,3 +5,23 @@ frontend/node_modules/
 .env
 .DS_Store
 .vscode
+
+.codex
+.env.*
+!.env.example
+# Local Codex files
+# CodeGraph local index
+.codegraph
+# Go build/test artifacts
+/bin/
+/dist/
+*.exe
+*.test
+coverage.out
+coverage.html
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+AGENTS.md

@@ -9,6 +9,7 @@ import (
 
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
+	"taskmanager-ai/internal/domain"
 	"taskmanager-ai/internal/storage"
 )
 
@@ -23,7 +24,7 @@ type State struct {
 	mu          sync.RWMutex
 	snapshot    collector.SystemSnapshot
 	hasSnapshot bool
-	aiClient    *ai.Client
+	aiAgent     *ai.Agent
 
 	subscriberMu sync.Mutex
 	subscribers  map[chan collector.SystemSnapshot]struct{}
@@ -38,7 +39,7 @@ func NewState(c *collector.Collector, buffer *storage.RingBuffer, logger *slog.L
 	return &State{collector: c, buffer: buffer, log: logger, subscribers: make(map[chan collector.SystemSnapshot]struct{})}
 }
 
-func (s *State) SetAIClient(client *ai.Client) { s.mu.Lock(); s.aiClient = client; s.mu.Unlock() }
+func (s *State) SetAIAgent(agent *ai.Agent) { s.mu.Lock(); s.aiAgent = agent; s.mu.Unlock() }
 
 func (s *State) Start(parent context.Context, interval time.Duration) {
 	s.startMu.Lock()
@@ -89,22 +90,22 @@ func (s *State) GetHistory(limit int) []collector.SystemSnapshot {
 	}
 	return s.buffer.GetLast(limit)
 }
-func (s *State) AskAI(ctx context.Context, question string) (string, error) {
+func (s *State) AskAI(ctx context.Context, question string) (*domain.AnalysisResponse, error) {
 	s.mu.RLock()
-	client := s.aiClient
+	agent := s.aiAgent
 	snapshot := cloneSnapshot(s.snapshot)
 	ready := s.hasSnapshot
 	s.mu.RUnlock()
-	if client == nil {
-		return "", ErrAIUnavailable
+	if agent == nil {
+		return nil, ErrAIUnavailable
 	}
 	if !ready {
-		return "", ErrSnapshotNotReady
+		return nil, ErrSnapshotNotReady
 	}
 
 	contextText := ai.BuildContext(snapshot, s.buffer.GetLast(10))
 
-	return client.Ask(ctx, question, contextText)
+	return agent.Ask(ctx, question, contextText)
 }
 
 func (s *State) Subscribe() (<-chan collector.SystemSnapshot, func()) {

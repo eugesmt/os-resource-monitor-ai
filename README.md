@@ -63,7 +63,7 @@ Browser
       Go server
        ├── collector (gopsutil)
        ├── ring buffer
-       └── AI client (DeepSeek)
+       └── AI agent → DeepSeek client
 ```
 
 API key не передаётся в браузер и не встраивается в frontend. Без `DEEPSEEK_API_KEY` мониторинг работает, AI-чат сообщает об отсутствии конфигурации.
