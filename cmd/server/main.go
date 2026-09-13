@@ -27,16 +27,20 @@ import (
 var webFS embed.FS
 
 type Config struct {
-	Addr              string
-	CollectorInterval time.Duration
-	HistorySize       int
-	MaxProcesses      int
-	AIModel           string
-	AIBaseURL         string
-	AIAPIKey          string
-	AIPrompt          string
-	ChatDBPath        string
-	AIMetrics         ai.UsageConfig
+	Addr                     string
+	CollectorInterval        time.Duration
+	HistorySize              int
+	MaxProcesses             int
+	AIModel                  string
+	AIBaseURL                string
+	AIAPIKey                 string
+	AIPrompt                 string
+	ChatDBPath               string
+	AIMetrics                ai.UsageConfig
+	AIRecentMessagesLimit    int
+	AISummarizationBatchSize int
+	AIMaxSummaryTokens       int
+	AISummarizationModel     string
 }
 
 func loadConfig() (Config, error) {
@@ -50,18 +54,52 @@ func loadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	recent, err := positiveEvenEnv("AI_RECENT_MESSAGES_LIMIT", 20)
+	if err != nil {
+		return Config{}, err
+	}
+	batch, err := positiveEvenEnv("AI_SUMMARIZATION_BATCH_SIZE", 10)
+	if err != nil {
+		return Config{}, err
+	}
+	maxSummary, err := positiveEnv("AI_MAX_SUMMARY_TOKENS", 800)
+	if err != nil {
+		return Config{}, err
+	}
+	mainModel := envOrDefault("DEEPSEEK_MODEL", "deepseek-v4-flash")
 	return Config{
-		Addr:              envOrDefault("ADDR", "127.0.0.1:8080"),
-		CollectorInterval: interval,
-		HistorySize:       envInt("HISTORY_SIZE", 300),
-		MaxProcesses:      envInt("MAX_PROCESSES", 100),
-		AIModel:           envOrDefault("DEEPSEEK_MODEL", "deepseek-v4-flash"),
-		AIBaseURL:         envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-		AIAPIKey:          strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
-		AIPrompt:          strings.TrimSpace(os.Getenv("AI_SYSTEM_PROMPT")),
-		ChatDBPath:        envOrDefault("CHAT_DB_PATH", "taskmanager.db"),
-		AIMetrics:         metrics,
+		Addr:                  envOrDefault("ADDR", "127.0.0.1:8080"),
+		CollectorInterval:     interval,
+		HistorySize:           envInt("HISTORY_SIZE", 300),
+		MaxProcesses:          envInt("MAX_PROCESSES", 100),
+		AIModel:               mainModel,
+		AIRecentMessagesLimit: recent, AISummarizationBatchSize: batch, AIMaxSummaryTokens: maxSummary,
+		AISummarizationModel: envOrDefault("AI_SUMMARIZATION_MODEL", mainModel),
+		AIBaseURL:            envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+		AIAPIKey:             strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
+		AIPrompt:             strings.TrimSpace(os.Getenv("AI_SYSTEM_PROMPT")),
+		ChatDBPath:           envOrDefault("CHAT_DB_PATH", "taskmanager.db"),
+		AIMetrics:            metrics,
 	}, nil
+}
+
+func positiveEnv(key string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return n, nil
+}
+func positiveEvenEnv(key string, fallback int) (int, error) {
+	n, err := positiveEnv(key, fallback)
+	if err == nil && n%2 != 0 {
+		return 0, fmt.Errorf("%s must be a positive even integer", key)
+	}
+	return n, err
 }
 
 func loadAIMetricsConfig() (ai.UsageConfig, error) {
@@ -140,7 +178,7 @@ func main() {
 	defer chatHistory.Close()
 	state.SetAIHistory(chatHistory)
 	if cfg.AIAPIKey != "" {
-		state.SetAIAgent(ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel, ai.WithLogger(logger), ai.WithUsageConfig(cfg.AIMetrics)), cfg.AIPrompt, chatHistory))
+		state.SetAIAgent(ai.NewConfiguredAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel, ai.WithLogger(logger), ai.WithUsageConfig(cfg.AIMetrics)), cfg.AIPrompt, chatHistory, cfg.AIRecentMessagesLimit, cfg.AISummarizationBatchSize, cfg.AIMaxSummaryTokens, cfg.AISummarizationModel))
 	}
 	state.Start(ctx, cfg.CollectorInterval)
 	defer state.Stop()

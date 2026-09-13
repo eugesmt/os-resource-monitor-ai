@@ -55,7 +55,9 @@ func (s *ChatHistory) Load(ctx context.Context) ([]domain.ChatMessage, error) {
 			u.assistant_message_id, u.model, u.current_request_tokens, u.history_tokens,
 			u.system_prompt_tokens, u.estimated_input_tokens, u.input_tokens, u.output_tokens,
 			u.total_tokens, u.estimated_cost_usd, u.component_token_count, u.usage_available,
-			u.usage_inconsistent, u.context_status, u.context_window_tokens, u.history_truncated
+			u.usage_inconsistent, u.context_status, u.context_window_tokens, u.history_truncated,
+			u.summary_tokens, u.recent_history_tokens, u.uncompressed_history_tokens,
+			u.estimated_uncompressed_input_tokens, u.estimated_tokens_saved, u.history_compacted
 		FROM chat_messages AS m
 		LEFT JOIN ai_call_usage AS u ON u.assistant_message_id = m.id
 		ORDER BY m.id ASC`)
@@ -68,9 +70,9 @@ func (s *ChatHistory) Load(ctx context.Context) ([]domain.ChatMessage, error) {
 		var message domain.ChatMessage
 		var assistantID sql.NullInt64
 		var model, component, contextStatus sql.NullString
-		var current, history, systemPrompt, estimatedInput, input, output, total, contextWindow, available, inconsistent, truncated sql.NullInt64
+		var current, history, systemPrompt, estimatedInput, input, output, total, contextWindow, available, inconsistent, truncated, summaryTokens, recentTokens, uncompressedTokens, estimatedUncompressed, saved, compacted sql.NullInt64
 		var cost sql.NullFloat64
-		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &assistantID, &model, &current, &history, &systemPrompt, &estimatedInput, &input, &output, &total, &cost, &component, &available, &inconsistent, &contextStatus, &contextWindow, &truncated); err != nil {
+		if err := rows.Scan(&message.ID, &message.Role, &message.Content, &assistantID, &model, &current, &history, &systemPrompt, &estimatedInput, &input, &output, &total, &cost, &component, &available, &inconsistent, &contextStatus, &contextWindow, &truncated, &summaryTokens, &recentTokens, &uncompressedTokens, &estimatedUncompressed, &saved, &compacted); err != nil {
 			return nil, err
 		}
 		if assistantID.Valid {
@@ -85,6 +87,7 @@ func (s *ChatHistory) Load(ctx context.Context) ([]domain.ChatMessage, error) {
 				UsageInconsistent:    inconsistent.Int64 != 0,
 				ContextStatus:        contextStatus.String,
 				HistoryTruncated:     truncated.Int64 != 0,
+				SummaryTokens:        int(summaryTokens.Int64), RecentHistoryTokens: int(recentTokens.Int64), UncompressedHistoryTokens: int(uncompressedTokens.Int64), EstimatedUncompressedInputTokens: int(estimatedUncompressed.Int64), EstimatedTokensSaved: int(saved.Int64), HistoryCompacted: compacted.Int64 != 0,
 			}
 			if input.Valid {
 				usage.InputTokens = intPtr(int(input.Int64))
@@ -140,12 +143,12 @@ func (s *ChatHistory) AppendTurn(ctx context.Context, userContent, assistantCont
 		assistant_message_id, user_message_id, model, current_request_tokens, history_tokens,
 		system_prompt_tokens, estimated_input_tokens, input_tokens, output_tokens, total_tokens,
 		estimated_cost_usd, component_token_count, usage_available, usage_inconsistent,
-		context_status, context_window_tokens, history_truncated
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			context_status, context_window_tokens, history_truncated, summary_tokens, recent_history_tokens, uncompressed_history_tokens, estimated_uncompressed_input_tokens, estimated_tokens_saved, history_compacted
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		assistantID, userID, usage.Model, usage.CurrentRequestTokens, usage.HistoryTokens,
 		usage.SystemPromptTokens, usage.EstimatedInputTokens, nullableInt(usage.InputTokens), nullableInt(usage.OutputTokens), nullableInt(usage.TotalTokens),
 		nullableFloat(usage.EstimatedCostUSD), usage.ComponentTokenCount, boolInt(usage.UsageAvailable), boolInt(usage.UsageInconsistent),
-		usage.ContextStatus, nullableInt(usage.ContextWindowTokens), boolInt(usage.HistoryTruncated)); err != nil {
+		usage.ContextStatus, nullableInt(usage.ContextWindowTokens), boolInt(usage.HistoryTruncated), nullableInt(&usage.SummaryTokens), nullableInt(&usage.RecentHistoryTokens), nullableInt(&usage.UncompressedHistoryTokens), nullableInt(&usage.EstimatedUncompressedInputTokens), nullableInt(&usage.EstimatedTokensSaved), boolInt(usage.HistoryCompacted)); err != nil {
 		_ = tx.Rollback()
 		return err
 	}

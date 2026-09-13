@@ -47,6 +47,16 @@ export DEEPSEEK_MODEL=
 export DEEPSEEK_BASE_URL=https://api.deepseek.com
 export CHAT_DB_PATH=taskmanager.db
 export AI_CONTEXT_WINDOW_TOKENS=128000
+export AI_RECENT_MESSAGES_LIMIT=20
+export AI_SUMMARIZATION_BATCH_SIZE=10
+export AI_MAX_SUMMARY_TOKENS=800
+export AI_SUMMARIZATION_MODEL=deepseek-v4-flash
+
+Диалоговая история сохраняется полностью. При превышении `AI_RECENT_MESSAGES_LIMIT`
+старые сообщения последовательно сворачиваются rolling summary батчами не больше
+`AI_SUMMARIZATION_BATCH_SIZE`; последняя неполная batch также обрабатывается перед
+основным вызовом. Summary не является transcript-сообщением. Goose migrations
+применяются явно к базе командой `goose -dir migrations sqlite3 <db> up`.
 export AI_INPUT_PRICE_PER_MILLION_TOKENS=0.14
 export AI_OUTPUT_PRICE_PER_MILLION_TOKENS=0.28
 ```

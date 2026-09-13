@@ -104,6 +104,7 @@ function formatAIUsage(usage) {
     `Ответ ${usageValue(usage.output_tokens)}`,
     `Всего ${usageValue(usage.total_tokens)}`,
   ];
+  if (usage.history_compacted) parts.push(`До сжатия ≈${usageValue(usage.estimated_uncompressed_input_tokens)} · После ≈${usageValue(usage.estimated_input_tokens)} · Экономия ≈${usageValue(usage.estimated_tokens_saved)} (${usage.estimated_uncompressed_input_tokens > 0 && usage.estimated_tokens_saved > 0 ? Math.round(usage.estimated_tokens_saved / usage.estimated_uncompressed_input_tokens * 100) + '%' : '—'})`);
   if (usage.estimated_cost_usd != null) parts.push(`≈$${Number(usage.estimated_cost_usd).toFixed(6)}`);
   return parts.join(' · ');
 }
@@ -114,6 +115,7 @@ function formatAIUsageDetails(usage) {
     `История: ≈${usageValue(usage.history_tokens)} токенов`,
     `Системный prompt: ≈${usageValue(usage.system_prompt_tokens)} токенов`,
     `Расчётный вход: ≈${usageValue(usage.estimated_input_tokens)} токенов`,
+    `Сводка: ≈${usageValue(usage.summary_tokens)} · Последние сообщения: ≈${usageValue(usage.recent_history_tokens)} токенов`,
     `Вход провайдера: ${usageValue(usage.input_tokens)} токенов`,
     `Ответ: ${usageValue(usage.output_tokens)} токенов`,
     `Всего: ${usageValue(usage.total_tokens)} токенов`,
@@ -130,6 +132,7 @@ function formatAIUsageDetails(usage) {
   if (usage.usage_available) lines.push('Usage провайдера: доступен');
   if (usage.usage_inconsistent) lines.push('Usage провайдера: значения расходятся');
   if (usage.history_truncated) lines.push('История: обрезана');
+  if (usage.history_compacted) lines.push(`Сжатие: до ≈${usageValue(usage.estimated_uncompressed_input_tokens)}, после ≈${usageValue(usage.estimated_input_tokens)}, экономия ≈${usageValue(usage.estimated_tokens_saved)}`);
   return lines.join('\n');
 }
 

@@ -64,8 +64,18 @@ func NewClient(apiKey, baseURL, model string, options ...ClientOption) *Client {
 }
 
 func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage) (CompletionResult, error) {
+	return c.complete(ctx, systemPrompt, messages, c.model, 2000, true)
+}
+
+func (c *Client) complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage, model string, maxTokens int, jsonResponse bool) (CompletionResult, error) {
 	usage := estimatePrompt(systemPrompt, messages)
-	usage.Model = c.model
+	usage.Model = model
+	for _, message := range messages {
+		if message.Role == openai.ChatMessageRoleSystem && strings.HasPrefix(message.Content, "DIALOGUE SUMMARY") {
+			usage.HistoryCompacted = true
+			usage.SummaryTokens = estimateTokens("summary", message.Content)
+		}
+	}
 	usage.ContextWindowTokens = nil
 	if c.usageConfig.ContextWindowTokens > 0 {
 		usage.ContextWindowTokens = intPtr(c.usageConfig.ContextWindowTokens)
@@ -93,7 +103,13 @@ func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []d
 	defer func() {
 		attrs := []any{
 			"call_id", callID,
-			"model", c.model,
+			"call_kind", func() string {
+				if jsonResponse {
+					return "main"
+				}
+				return "summarizer"
+			}(),
+			"model", model,
 			"outcome", outcome,
 			"duration", time.Since(started),
 			"system_prompt_tokens", usage.SystemPromptTokens,
@@ -102,7 +118,8 @@ func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []d
 			"estimated_input_tokens", usage.EstimatedInputTokens,
 			"component_token_count", usage.ComponentTokenCount,
 			"history_messages", max(0, len(messages)-1),
-			"history_truncated", false,
+			"history_truncated", usage.HistoryTruncated,
+			"history_compacted", usage.HistoryCompacted,
 			"usage_available", usage.UsageAvailable,
 			"usage_inconsistent", usage.UsageInconsistent,
 		}
@@ -129,14 +146,15 @@ func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []d
 		}
 		c.log.Info("AI model call", attrs...)
 	}()
-	resp, err := c.client.CreateChatCompletion(requestCtx, openai.ChatCompletionRequest{
-		Model:     c.model,
+	request := openai.ChatCompletionRequest{
+		Model:     model,
 		Messages:  requestMessages,
-		MaxTokens: 2000,
-		ResponseFormat: &openai.ChatCompletionResponseFormat{
-			Type: openai.ChatCompletionResponseFormatTypeJSONObject,
-		},
-	})
+		MaxTokens: maxTokens,
+	}
+	if jsonResponse {
+		request.ResponseFormat = &openai.ChatCompletionResponseFormat{Type: openai.ChatCompletionResponseFormatTypeJSONObject}
+	}
+	resp, err := c.client.CreateChatCompletion(requestCtx, request)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			outcome = "cancelled"
