@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strings"
+	"time"
 
 	"taskmanager-ai/internal/domain"
 
@@ -12,12 +15,29 @@ import (
 )
 
 type Client struct {
-	client *openai.Client
-	model  string
-	sem    chan struct{}
+	client      *openai.Client
+	model       string
+	sem         chan struct{}
+	log         *slog.Logger
+	usageConfig UsageConfig
 }
 
-func NewClient(apiKey, baseURL, model string) *Client {
+type ClientOption func(*clientOptions)
+
+type clientOptions struct {
+	log         *slog.Logger
+	usageConfig UsageConfig
+}
+
+func WithLogger(logger *slog.Logger) ClientOption {
+	return func(options *clientOptions) { options.log = logger }
+}
+
+func WithUsageConfig(config UsageConfig) ClientOption {
+	return func(options *clientOptions) { options.usageConfig = config }
+}
+
+func NewClient(apiKey, baseURL, model string, options ...ClientOption) *Client {
 	config := openai.DefaultConfig(apiKey)
 	if baseURL != "" {
 		config.BaseURL = strings.TrimRight(baseURL, "/")
@@ -25,19 +45,37 @@ func NewClient(apiKey, baseURL, model string) *Client {
 	if model == "" {
 		model = "deepseek-chat"
 	}
+	clientOptions := clientOptions{log: slog.Default()}
+	for _, option := range options {
+		if option != nil {
+			option(&clientOptions)
+		}
+	}
+	if clientOptions.log == nil {
+		clientOptions.log = slog.Default()
+	}
 	return &Client{
-		client: openai.NewClientWithConfig(config),
-		model:  model,
-		sem:    make(chan struct{}, 1),
+		client:      openai.NewClientWithConfig(config),
+		model:       model,
+		sem:         make(chan struct{}, 1),
+		log:         clientOptions.log,
+		usageConfig: clientOptions.usageConfig,
 	}
 }
 
-func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage) (string, error) {
+func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage) (CompletionResult, error) {
+	usage := estimatePrompt(systemPrompt, messages)
+	usage.Model = c.model
+	usage.ContextWindowTokens = nil
+	if c.usageConfig.ContextWindowTokens > 0 {
+		usage.ContextWindowTokens = intPtr(c.usageConfig.ContextWindowTokens)
+	}
+	usage.ContextStatus = contextStatus(usage.EstimatedInputTokens, c.usageConfig)
 	select {
 	case c.sem <- struct{}{}:
 		defer func() { <-c.sem }()
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return CompletionResult{Usage: usage}, ctx.Err()
 	}
 
 	requestCtx, cancel := context.WithTimeout(ctx, RequestTimeout)
@@ -48,9 +86,52 @@ func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []d
 	for _, message := range messages {
 		requestMessages = append(requestMessages, openai.ChatCompletionMessage{Role: message.Role, Content: message.Content})
 	}
+	callID := usageCallID()
+	started := time.Now()
+	outcome := "upstream_error"
+	responseID := ""
+	defer func() {
+		attrs := []any{
+			"call_id", callID,
+			"model", c.model,
+			"outcome", outcome,
+			"duration", time.Since(started),
+			"system_prompt_tokens", usage.SystemPromptTokens,
+			"current_request_tokens", usage.CurrentRequestTokens,
+			"history_tokens", usage.HistoryTokens,
+			"estimated_input_tokens", usage.EstimatedInputTokens,
+			"component_token_count", usage.ComponentTokenCount,
+			"history_messages", max(0, len(messages)-1),
+			"history_truncated", false,
+			"usage_available", usage.UsageAvailable,
+			"usage_inconsistent", usage.UsageInconsistent,
+		}
+		if usage.ContextWindowTokens != nil {
+			attrs = append(attrs, "context_window_tokens", *usage.ContextWindowTokens)
+		}
+		if usage.ContextStatus != "" {
+			attrs = append(attrs, "context_status", usage.ContextStatus)
+		}
+		if usage.InputTokens != nil {
+			attrs = append(attrs, "input_tokens", *usage.InputTokens)
+		}
+		if usage.OutputTokens != nil {
+			attrs = append(attrs, "output_tokens", *usage.OutputTokens)
+		}
+		if usage.TotalTokens != nil {
+			attrs = append(attrs, "total_tokens", *usage.TotalTokens)
+		}
+		if usage.EstimatedCostUSD != nil {
+			attrs = append(attrs, "estimated_cost_usd", *usage.EstimatedCostUSD)
+		}
+		if responseID != "" {
+			attrs = append(attrs, "response_id", responseID)
+		}
+		c.log.Info("AI model call", attrs...)
+	}()
 	resp, err := c.client.CreateChatCompletion(requestCtx, openai.ChatCompletionRequest{
-		Model: c.model,
-		Messages: requestMessages,
+		Model:     c.model,
+		Messages:  requestMessages,
 		MaxTokens: 2000,
 		ResponseFormat: &openai.ChatCompletionResponseFormat{
 			Type: openai.ChatCompletionResponseFormatTypeJSONObject,
@@ -58,23 +139,52 @@ func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []d
 	})
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
-			return "", ctx.Err()
+			outcome = "cancelled"
+			return CompletionResult{Usage: usage}, ctx.Err()
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("%w: request timed out", ErrTimeout)
+			outcome = "timeout"
+			return CompletionResult{Usage: usage}, fmt.Errorf("%w: request timed out", ErrTimeout)
 		}
-		return "", fmt.Errorf("%w: AI request failed: %v", ErrUpstream, err)
+		if isContextOverflow(err) {
+			outcome = "context_window_exceeded"
+			usage.ContextStatus = "context_window_exceeded"
+			return CompletionResult{Usage: usage}, fmt.Errorf("%w: %w", ErrContextWindowExceeded, err)
+		}
+		return CompletionResult{Usage: usage}, fmt.Errorf("%w: AI request failed: %w", ErrUpstream, err)
 	}
+	responseID = resp.ID
+	usage = providerUsage(usage, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+	usage.ContextStatus = contextStatusForProvider(resp.Usage.PromptTokens, c.usageConfig)
+	addCost(&usage, c.usageConfig)
 	if len(resp.Choices) == 0 {
-		return "", errors.New("AI returned an empty response")
+		return CompletionResult{Usage: usage}, errors.New("AI returned an empty response")
 	}
 	choice := resp.Choices[0]
 	if choice.FinishReason == openai.FinishReasonLength {
-		return "", ErrTruncated
+		outcome = "output_truncated"
+		return CompletionResult{Usage: usage}, ErrTruncated
 	}
 	content := strings.TrimSpace(choice.Message.Content)
 	if content == "" {
-		return "", errors.New("AI returned an empty response")
+		return CompletionResult{Usage: usage}, errors.New("AI returned an empty response")
 	}
-	return content, nil
+	outcome = "success"
+	return CompletionResult{Content: content, Usage: usage}, nil
+}
+
+func isContextOverflow(err error) bool {
+	var apiErr *openai.APIError
+	if !errors.As(err, &apiErr) || apiErr.HTTPStatusCode != http.StatusBadRequest {
+		return false
+	}
+	code := strings.ToLower(strings.TrimSpace(fmt.Sprint(apiErr.Code)))
+	typ := strings.ToLower(strings.TrimSpace(apiErr.Type))
+	for _, value := range []string{code, typ} {
+		if value == "context_length_exceeded" || value == "context_length_exceeded_error" || value == "input_context_length_exceeded" {
+			return true
+		}
+	}
+	message := strings.ToLower(apiErr.Message)
+	return strings.Contains(message, "context length") || strings.Contains(message, "maximum context") || strings.Contains(message, "prompt is too long") || strings.Contains(message, "token limit")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -35,14 +36,19 @@ type Config struct {
 	AIAPIKey          string
 	AIPrompt          string
 	ChatDBPath        string
+	AIMetrics         ai.UsageConfig
 }
 
-func loadConfig() Config {
+func loadConfig() (Config, error) {
 	interval := 2 * time.Second
 	if raw := strings.TrimSpace(os.Getenv("COLLECTOR_INTERVAL_MS")); raw != "" {
 		if ms, err := strconv.Atoi(raw); err == nil && ms > 0 {
 			interval = time.Duration(ms) * time.Millisecond
 		}
+	}
+	metrics, err := loadAIMetricsConfig()
+	if err != nil {
+		return Config{}, err
 	}
 	return Config{
 		Addr:              envOrDefault("ADDR", "127.0.0.1:8080"),
@@ -54,8 +60,48 @@ func loadConfig() Config {
 		AIAPIKey:          strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
 		AIPrompt:          strings.TrimSpace(os.Getenv("AI_SYSTEM_PROMPT")),
 		ChatDBPath:        envOrDefault("CHAT_DB_PATH", "taskmanager.db"),
-	}
+		AIMetrics:         metrics,
+	}, nil
 }
+
+func loadAIMetricsConfig() (ai.UsageConfig, error) {
+	var config ai.UsageConfig
+	if raw := strings.TrimSpace(os.Getenv("AI_CONTEXT_WINDOW_TOKENS")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return ai.UsageConfig{}, fmt.Errorf("AI_CONTEXT_WINDOW_TOKENS must be a non-negative integer")
+		}
+		config.ContextWindowTokens = n
+	}
+	input, inputSet, err := optionalDecimalEnv("AI_INPUT_PRICE_PER_MILLION_TOKENS")
+	if err != nil {
+		return ai.UsageConfig{}, err
+	}
+	output, outputSet, err := optionalDecimalEnv("AI_OUTPUT_PRICE_PER_MILLION_TOKENS")
+	if err != nil {
+		return ai.UsageConfig{}, err
+	}
+	if inputSet && outputSet {
+		config.InputPricePerMillionTokens = input
+		config.OutputPricePerMillionTokens = output
+		config.PricingConfigured = true
+	}
+	return config, nil
+}
+
+func optionalDecimalEnv(key string) (float64, bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0, false, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || !finiteNonNegative(v) {
+		return 0, false, fmt.Errorf("%s must be a non-negative decimal", key)
+	}
+	return v, true, nil
+}
+
+func finiteNonNegative(v float64) bool { return v >= 0 && v < 1e308 }
 func envInt(key string, fallback int) int {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -76,7 +122,11 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		logger.Warn("failed to load .env", "error", err)
 	}
-	cfg := loadConfig()
+	cfg, err := loadConfig()
+	if err != nil {
+		logger.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -90,7 +140,7 @@ func main() {
 	defer chatHistory.Close()
 	state.SetAIHistory(chatHistory)
 	if cfg.AIAPIKey != "" {
-		state.SetAIAgent(ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), cfg.AIPrompt, chatHistory))
+		state.SetAIAgent(ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel, ai.WithLogger(logger), ai.WithUsageConfig(cfg.AIMetrics)), cfg.AIPrompt, chatHistory))
 	}
 	state.Start(ctx, cfg.CollectorInterval)
 	defer state.Stop()

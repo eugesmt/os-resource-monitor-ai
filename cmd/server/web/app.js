@@ -87,15 +87,95 @@ async function loadInitialState() {
     for (const item of (Array.isArray(payload.items) ? payload.items : [])) {
       if (item.role === 'user') addMessage('user', item.content);
       if (item.role === 'assistant') {
-        try { addMessage('ai', formatAIAnswer(JSON.parse(item.content))); } catch { /* ignore malformed legacy rows */ }
+        try { addMessage('ai', formatAIAnswer(JSON.parse(item.content)), item.usage); } catch { /* ignore malformed legacy rows */ }
       }
     }
   }
 }
 
-function addMessage(role, text) {
+function usageValue(value) { return value == null ? '—' : String(value); }
+
+function formatAIUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const parts = [
+    `Запрос ≈${usageValue(usage.current_request_tokens)}`,
+    `История ≈${usageValue(usage.history_tokens)}`,
+    `Вход ${usageValue(usage.input_tokens)}`,
+    `Ответ ${usageValue(usage.output_tokens)}`,
+    `Всего ${usageValue(usage.total_tokens)}`,
+  ];
+  if (usage.estimated_cost_usd != null) parts.push(`≈$${Number(usage.estimated_cost_usd).toFixed(6)}`);
+  return parts.join(' · ');
+}
+
+function formatAIUsageDetails(usage) {
+  const lines = [
+    `Запрос: ≈${usageValue(usage.current_request_tokens)} токенов`,
+    `История: ≈${usageValue(usage.history_tokens)} токенов`,
+    `Системный prompt: ≈${usageValue(usage.system_prompt_tokens)} токенов`,
+    `Расчётный вход: ≈${usageValue(usage.estimated_input_tokens)} токенов`,
+    `Вход провайдера: ${usageValue(usage.input_tokens)} токенов`,
+    `Ответ: ${usageValue(usage.output_tokens)} токенов`,
+    `Всего: ${usageValue(usage.total_tokens)} токенов`,
+  ];
+  if (usage.estimated_cost_usd != null) {
+    lines.push(`Стоимость: ≈$${Number(usage.estimated_cost_usd).toFixed(6)}`);
+  }
+  if (usage.model) lines.push(`Модель: ${usage.model}`);
+  if (usage.context_status) lines.push(`Контекст: ${usage.context_status}`);
+  if (usage.context_window_tokens) {
+    lines.push(`Окно контекста: ${usage.context_window_tokens} токенов`);
+  }
+  if (usage.component_token_count) lines.push(`Метод подсчёта: ${usage.component_token_count}`);
+  if (usage.usage_available) lines.push('Usage провайдера: доступен');
+  if (usage.usage_inconsistent) lines.push('Usage провайдера: значения расходятся');
+  if (usage.history_truncated) lines.push('История: обрезана');
+  return lines.join('\n');
+}
+
+function addUsageMetadata(node, usage) {
+  const metadata = formatAIUsage(usage);
+  if (!metadata) return;
+  const row = document.createElement('div');
+  row.className = 'message-usage';
+  const icon = document.createElement('span');
+  icon.className = 'message-usage-icon';
+  icon.textContent = 'ⓘ';
+  icon.setAttribute('aria-label', 'Показать статистику токенов');
+  icon.tabIndex = 0;
+  const summary = document.createElement('span');
+  summary.className = 'message-usage-summary';
+  summary.textContent = metadata;
+  const details = document.createElement('span');
+  details.className = 'message-usage-tooltip';
+  details.textContent = formatAIUsageDetails(usage);
+  row.append(icon, summary, details);
+  node.appendChild(row);
+  if (usage.context_status === 'approaching_limit' && usage.context_window_tokens) {
+    const measured = usage.input_tokens ?? usage.estimated_input_tokens;
+    const percent = Math.round((Number(measured) / Number(usage.context_window_tokens)) * 100);
+    const warning = document.createElement('div');
+    warning.className = 'message-diagnostic warning';
+    warning.textContent = `Контекст: ${percent}% — близко к лимиту`;
+    node.appendChild(warning);
+  }
+}
+
+function addMessage(role, text, usage) {
   const node = document.createElement('div');
   node.className = `message ${role}`;
+  const content = document.createElement('div');
+  content.className = 'message-content';
+  content.textContent = text;
+  node.appendChild(content);
+  if (role === 'ai') addUsageMetadata(node, usage);
+  $('chat').appendChild(node);
+  $('chat').scrollTop = $('chat').scrollHeight;
+}
+
+function addDiagnostic(text, kind = 'error') {
+  const node = document.createElement('div');
+  node.className = `message-diagnostic ${kind}`;
   node.textContent = text;
   $('chat').appendChild(node);
   $('chat').scrollTop = $('chat').scrollHeight;
@@ -239,8 +319,14 @@ $('askForm').addEventListener('submit', async (event) => {
       body: JSON.stringify({ question }),
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || 'AI request failed');
-    addMessage('ai', formatAIAnswer(payload.answer));
+    if (!response.ok) {
+      if (response.status === 422 && payload.error === 'AI context window exceeded') {
+        addDiagnostic('Провайдер отклонил вызов: контекстное окно превышено. Приложение отправило полную историю и не обрезало её.', 'error');
+        if (payload.usage) addDiagnostic(formatAIUsage(payload.usage), 'warning');
+      }
+      throw new Error(payload.error || 'AI request failed');
+    }
+    addMessage('ai', formatAIAnswer(payload.answer), payload.usage);
   } catch (error) {
     $('aiError').textContent = error instanceof Error ? error.message : 'Не удалось получить ответ AI';
   } finally {

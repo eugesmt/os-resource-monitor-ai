@@ -30,24 +30,24 @@ type fakeHistory struct {
 func (f *fakeHistory) Load(context.Context) ([]domain.ChatMessage, error) {
 	return append([]domain.ChatMessage(nil), f.messages...), f.err
 }
-func (f *fakeHistory) AppendTurn(_ context.Context, user, assistant string) error {
+func (f *fakeHistory) AppendTurn(_ context.Context, user, assistant string, _ domain.AICallUsage) error {
 	f.appended = append(f.appended, [2]string{user, assistant})
 	return f.err
 }
 
-func (f *fakeCompletion) Complete(_ context.Context, systemPrompt string, messages []domain.ChatMessage) (string, error) {
+func (f *fakeCompletion) Complete(_ context.Context, systemPrompt string, messages []domain.ChatMessage) (CompletionResult, error) {
 	f.calls++
 	f.systemPrompt = systemPrompt
 	f.messages = append([]domain.ChatMessage(nil), messages...)
 	if len(messages) > 0 {
 		f.userContent = messages[len(messages)-1].Content
 	}
-	return f.answer, f.err
+	return CompletionResult{Content: f.answer, Usage: domain.AICallUsage{Model: "test-model", ComponentTokenCount: "estimated", ContextStatus: "unknown", UsageAvailable: true}}, f.err
 }
 
 func TestAgentAskValidatesAndComposesPrompt(t *testing.T) {
 	fake := &fakeCompletion{answer: `{"summary":"answer","facts":[],"recommendations":[]}`}
-	answer, err := newAgent(fake, "test system prompt").Ask(context.Background(), "  what is happening?  ", "runtime context: unique")
+	answer, _, err := newAgent(fake, "test system prompt").Ask(context.Background(), "  what is happening?  ", "runtime context: unique")
 	if err != nil {
 		t.Fatalf("Ask() error = %v", err)
 	}
@@ -77,7 +77,7 @@ func TestAgentAskValidationDoesNotCallTransport(t *testing.T) {
 	for name, question := range map[string]string{"empty": " \t\n", "too long": strings.Repeat("я", 4001)} {
 		t.Run(name, func(t *testing.T) {
 			fake := &fakeCompletion{}
-			_, err := newAgent(fake, "test system prompt").Ask(context.Background(), question, "context")
+			_, _, err := newAgent(fake, "test system prompt").Ask(context.Background(), question, "context")
 			if err == nil {
 				t.Fatal("Ask() error = nil")
 			}
@@ -90,7 +90,7 @@ func TestAgentAskValidationDoesNotCallTransport(t *testing.T) {
 
 func TestAgentAskReturnsCompletionError(t *testing.T) {
 	wantErr := errors.New("upstream")
-	_, err := newAgent(&fakeCompletion{err: wantErr}, "test system prompt").Ask(context.Background(), "question", "context")
+	_, _, err := newAgent(&fakeCompletion{err: wantErr}, "test system prompt").Ask(context.Background(), "question", "context")
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("error = %v, want %v", err, wantErr)
 	}
@@ -99,7 +99,7 @@ func TestAgentAskReturnsCompletionError(t *testing.T) {
 func TestAgentAskUsesAndPersistsHistory(t *testing.T) {
 	history := &fakeHistory{messages: []domain.ChatMessage{{Role: domain.ChatRoleUser, Content: "old question"}, {Role: domain.ChatRoleAssistant, Content: "old answer"}}}
 	fake := &fakeCompletion{answer: `{"summary":"answer","facts":[],"recommendations":[]}`}
-	if _, err := newAgent(fake, "system", history).Ask(context.Background(), "new question", "context"); err != nil {
+	if _, _, err := newAgent(fake, "system", history).Ask(context.Background(), "new question", "context"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(fake.userContent, "new question") {
@@ -121,7 +121,7 @@ func TestAgentHistorySurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake1 := &fakeCompletion{answer: valid}
-	if _, err := newAgent(fake1, "system", store).Ask(context.Background(), "first", "context-1"); err != nil {
+	if _, _, err := newAgent(fake1, "system", store).Ask(context.Background(), "first", "context-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -133,7 +133,7 @@ func TestAgentHistorySurvivesReopen(t *testing.T) {
 	}
 	defer store.Close()
 	fake2 := &fakeCompletion{answer: valid}
-	if _, err := newAgent(fake2, "system", store).Ask(context.Background(), "second", "context-2"); err != nil {
+	if _, _, err := newAgent(fake2, "system", store).Ask(context.Background(), "second", "context-2"); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake2.messages) != 3 || fake2.messages[0].Content != "first" || fake2.messages[1].Content != valid || !strings.Contains(fake2.messages[2].Content, "context-2") {
@@ -157,7 +157,7 @@ func TestAgentAskRejectsInvalidStructuredResponse(t *testing.T) {
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := newAgent(&fakeCompletion{answer: content}, "test system prompt").Ask(context.Background(), "question", "context")
+			_, _, err := newAgent(&fakeCompletion{answer: content}, "test system prompt").Ask(context.Background(), "question", "context")
 			if !errors.Is(err, ErrInvalidResponse) {
 				t.Fatalf("error = %v, want ErrInvalidResponse", err)
 			}

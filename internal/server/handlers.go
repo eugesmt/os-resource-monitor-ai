@@ -26,11 +26,18 @@ type aiRequest struct {
 }
 type aiResponse struct {
 	Answer *domain.AnalysisResponse `json:"answer"`
+	Usage  domain.AICallUsage       `json:"usage"`
+}
+type aiUsageErrorResponse struct {
+	Error string             `json:"error"`
+	Usage domain.AICallUsage `json:"usage"`
 }
 type historyResponse struct {
 	Items []collector.SystemSnapshot `json:"items"`
 }
-type aiHistoryResponse struct { Items []domain.ChatMessage `json:"items"` }
+type aiHistoryResponse struct {
+	Items []domain.ChatMessage `json:"items"`
+}
 
 func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -83,8 +90,13 @@ func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), ai.RequestTimeout)
 		defer cancel()
-		answer, err := state.AskAI(ctx, req.Question)
+		answer, usage, err := state.AskAI(ctx, req.Question)
 		if err != nil {
+			if errors.Is(err, ai.ErrContextWindowExceeded) {
+				state.log.Error("AI request failed", "error", err)
+				writeJSON(w, http.StatusUnprocessableEntity, aiUsageErrorResponse{Error: "AI context window exceeded", Usage: usage})
+				return
+			}
 			status := 502
 			publicErr := errors.New("AI service temporarily unavailable")
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ai.ErrTimeout) {
@@ -92,17 +104,25 @@ func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
 				publicErr = errors.New("AI service timed out")
 			} else if errors.Is(err, ErrAIUnavailable) || errors.Is(err, ErrSnapshotNotReady) || errors.Is(err, ai.ErrPromptNotConfigured) {
 				status = 503
+			} else if errors.Is(err, ai.ErrTruncated) {
+				publicErr = errors.New("AI response was truncated")
 			}
 			state.log.Error("AI request failed", "error", err)
 			writeAPIError(w, status, publicErr)
 			return
 		}
-		writeJSON(w, 200, aiResponse{Answer: answer})
+		writeJSON(w, 200, aiResponse{Answer: answer, Usage: usage})
 	})
 	mux.HandleFunc("/api/ai/history", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet { methodNotAllowed(w); return }
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
 		items, err := state.GetAIHistory(r.Context())
-		if err != nil { writeAPIError(w, 503, err); return }
+		if err != nil {
+			writeAPIError(w, 503, err)
+			return
+		}
 		writeJSON(w, http.StatusOK, aiHistoryResponse{Items: items})
 	})
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {

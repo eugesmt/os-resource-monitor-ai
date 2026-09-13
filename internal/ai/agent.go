@@ -45,12 +45,12 @@ func validateAnalysisResponse(result domain.AnalysisResponse, responseBytes int)
 }
 
 type completion interface {
-	Complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage) (string, error)
+	Complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage) (CompletionResult, error)
 }
 
 type HistoryStore interface {
 	Load(context.Context) ([]domain.ChatMessage, error)
-	AppendTurn(context.Context, string, string) error
+	AppendTurn(context.Context, string, string, domain.AICallUsage) error
 }
 
 type Agent struct {
@@ -72,13 +72,13 @@ func newAgent(completion completion, prompt string, history ...HistoryStore) *Ag
 	return &Agent{completion: completion, systemPrompt: strings.TrimSpace(prompt), history: store}
 }
 
-func (a *Agent) Ask(ctx context.Context, question, contextText string) (*domain.AnalysisResponse, error) {
+func (a *Agent) Ask(ctx context.Context, question, contextText string) (*domain.AnalysisResponse, domain.AICallUsage, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
-		return nil, errors.New("question is empty")
+		return nil, domain.AICallUsage{}, errors.New("question is empty")
 	}
 	if len([]rune(question)) > 4000 {
-		return nil, errors.New("question exceeds 4000 characters")
+		return nil, domain.AICallUsage{}, errors.New("question exceeds 4000 characters")
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -87,29 +87,29 @@ func (a *Agent) Ask(ctx context.Context, question, contextText string) (*domain.
 		var err error
 		messages, err = a.history.Load(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("load chat history: %w", err)
+			return nil, domain.AICallUsage{}, fmt.Errorf("load chat history: %w", err)
 		}
 	}
 
 	userContent := fmt.Sprintf("CURRENT REQUEST\n\nSYSTEM CONTEXT (authoritative source for metrics):\n%s\n\nUSER QUESTION:\n%s\n\nUse previous messages only as DIALOGUE HISTORY for understanding the question. Do not use numbers from previous AI answers as system metrics.", contextText, question)
 	messages = append(messages, domain.ChatMessage{Role: domain.ChatRoleUser, Content: userContent})
-	content, err := a.completion.Complete(ctx, a.systemPrompt, messages)
+	completion, err := a.completion.Complete(ctx, a.systemPrompt, messages)
 	if err != nil {
-		return nil, err
+		return nil, completion.Usage, err
 	}
 	var result domain.AnalysisResponse
-	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	if err := json.Unmarshal([]byte(completion.Content), &result); err != nil {
+		return nil, completion.Usage, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
 	}
-	if err := validateAnalysisResponse(result, len([]byte(content))); err != nil {
-		return nil, err
+	if err := validateAnalysisResponse(result, len([]byte(completion.Content))); err != nil {
+		return nil, completion.Usage, err
 	}
 	if a.history != nil {
-		if err := a.history.AppendTurn(ctx, question, content); err != nil {
-			return nil, fmt.Errorf("persist chat history: %w", err)
+		if err := a.history.AppendTurn(ctx, question, completion.Content, completion.Usage); err != nil {
+			return nil, completion.Usage, fmt.Errorf("persist chat history: %w", err)
 		}
 	}
-	return &result, nil
+	return &result, completion.Usage, nil
 }
 
 func (a *Agent) History(ctx context.Context) ([]domain.ChatMessage, error) {

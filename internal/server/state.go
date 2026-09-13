@@ -96,17 +96,17 @@ func (s *State) GetHistory(limit int) []collector.SystemSnapshot {
 	}
 	return s.buffer.GetLast(limit)
 }
-func (s *State) AskAI(ctx context.Context, question string) (*domain.AnalysisResponse, error) {
+func (s *State) AskAI(ctx context.Context, question string) (*domain.AnalysisResponse, domain.AICallUsage, error) {
 	s.mu.RLock()
 	agent := s.aiAgent
 	snapshot := cloneSnapshot(s.snapshot)
 	ready := s.hasSnapshot
 	s.mu.RUnlock()
 	if agent == nil {
-		return nil, ErrAIUnavailable
+		return nil, domain.AICallUsage{}, ErrAIUnavailable
 	}
 	if !ready {
-		return nil, ErrSnapshotNotReady
+		return nil, domain.AICallUsage{}, ErrSnapshotNotReady
 	}
 
 	snapshotHistory := s.buffer.GetLast(10)
