@@ -34,6 +34,7 @@ type Config struct {
 	AIBaseURL         string
 	AIAPIKey          string
 	AIPrompt          string
+	ChatDBPath        string
 }
 
 func loadConfig() Config {
@@ -52,6 +53,7 @@ func loadConfig() Config {
 		AIBaseURL:         envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 		AIAPIKey:          strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
 		AIPrompt:          strings.TrimSpace(os.Getenv("AI_SYSTEM_PROMPT")),
+		ChatDBPath:        envOrDefault("CHAT_DB_PATH", "taskmanager.db"),
 	}
 }
 func envInt(key string, fallback int) int {
@@ -80,8 +82,15 @@ func main() {
 
 	c := collector.New(cfg.MaxProcesses, logger)
 	state := server.NewState(c, storage.NewRingBuffer(cfg.HistorySize), logger)
+	chatHistory, err := storage.OpenChatHistory(cfg.ChatDBPath)
+	if err != nil {
+		logger.Error("chat database", "error", err)
+		os.Exit(1)
+	}
+	defer chatHistory.Close()
+	state.SetAIHistory(chatHistory)
 	if cfg.AIAPIKey != "" {
-		state.SetAIAgent(ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), cfg.AIPrompt))
+		state.SetAIAgent(ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), cfg.AIPrompt, chatHistory))
 	}
 	state.Start(ctx, cfg.CollectorInterval)
 	defer state.Stop()

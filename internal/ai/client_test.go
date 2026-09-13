@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"taskmanager-ai/internal/domain"
 	"testing"
 	"time"
 )
@@ -21,20 +22,21 @@ func TestClientCompleteSendsModelAndMessages(t *testing.T) {
 			t.Errorf("model = %v", request["model"])
 		}
 		messages, ok := request["messages"].([]any)
-		if !ok || len(messages) != 2 {
+		if !ok || len(messages) != 4 {
 			t.Fatalf("messages = %v", request["messages"])
 		}
-		first, _ := messages[0].(map[string]any)
-		second, _ := messages[1].(map[string]any)
-		if first["role"] != "system" || first["content"] != "system" ||
-			second["role"] != "user" || second["content"] != "content" {
-			t.Fatalf("messages = %v", messages)
+		want := [][2]string{{"system", "system"}, {"user", "old question"}, {"assistant", "old answer"}, {"user", "content"}}
+		for i, expected := range want {
+			message, _ := messages[i].(map[string]any)
+			if message["role"] != expected[0] || message["content"] != expected[1] {
+				t.Fatalf("messages = %v", messages)
+			}
 		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"  answer  "}}]}`))
 	}))
 	defer server.Close()
 
-	answer, err := NewClient("key", server.URL, "test-model").Complete(context.Background(), "system", "content")
+	answer, err := NewClient("key", server.URL, "test-model").Complete(context.Background(), "system", []domain.ChatMessage{{Role: domain.ChatRoleUser, Content: "old question"}, {Role: domain.ChatRoleAssistant, Content: "old answer"}, {Role: domain.ChatRoleUser, Content: "content"}})
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -48,7 +50,7 @@ func TestClientCompleteEmptyChoices(t *testing.T) {
 		_, _ = w.Write([]byte(`{"choices":[]}`))
 	}))
 	defer server.Close()
-	_, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", "content")
+	_, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", []domain.ChatMessage{{Role: domain.ChatRoleUser, Content: "content"}})
 	if err == nil || !strings.Contains(err.Error(), "empty response") {
 		t.Fatalf("error = %v", err)
 	}
@@ -59,7 +61,7 @@ func TestClientCompleteUpstreamError(t *testing.T) {
 		http.Error(w, `{"error":{"message":"bad upstream"}}`, http.StatusBadGateway)
 	}))
 	defer server.Close()
-	_, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", "content")
+	_, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", []domain.ChatMessage{{Role: domain.ChatRoleUser, Content: "content"}})
 	if err == nil || !strings.Contains(err.Error(), "AI request failed") {
 		t.Fatalf("error = %v", err)
 	}
@@ -68,7 +70,7 @@ func TestClientCompleteUpstreamError(t *testing.T) {
 func TestClientCompleteCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := NewClient("key", "http://127.0.0.1:1", "model").Complete(ctx, "system", "content")
+	_, err := NewClient("key", "http://127.0.0.1:1", "model").Complete(ctx, "system", []domain.ChatMessage{{Role: domain.ChatRoleUser, Content: "content"}})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
@@ -79,7 +81,7 @@ func TestClientCompleteDeadlineContext(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err := NewClient("key", server.URL, "model").Complete(ctx, "system", "content")
+	_, err := NewClient("key", server.URL, "model").Complete(ctx, "system", []domain.ChatMessage{{Role: domain.ChatRoleUser, Content: "content"}})
 	if err == nil || !errors.Is(err, ErrTimeout) {
 		t.Fatalf("error = %v", err)
 	}

@@ -25,6 +25,7 @@ type State struct {
 	snapshot    collector.SystemSnapshot
 	hasSnapshot bool
 	aiAgent     *ai.Agent
+	aiHistory   ai.HistoryStore
 
 	subscriberMu sync.Mutex
 	subscribers  map[chan collector.SystemSnapshot]struct{}
@@ -40,6 +41,11 @@ func NewState(c *collector.Collector, buffer *storage.RingBuffer, logger *slog.L
 }
 
 func (s *State) SetAIAgent(agent *ai.Agent) { s.mu.Lock(); s.aiAgent = agent; s.mu.Unlock() }
+func (s *State) SetAIHistory(history ai.HistoryStore) {
+	s.mu.Lock()
+	s.aiHistory = history
+	s.mu.Unlock()
+}
 
 func (s *State) Start(parent context.Context, interval time.Duration) {
 	s.startMu.Lock()
@@ -103,9 +109,33 @@ func (s *State) AskAI(ctx context.Context, question string) (*domain.AnalysisRes
 		return nil, ErrSnapshotNotReady
 	}
 
-	contextText := ai.BuildContext(snapshot, s.buffer.GetLast(10))
+	snapshotHistory := s.buffer.GetLast(10)
+	// The collector updates the state and ring buffer in two separate steps.
+	// Make the current snapshot explicit so the AI never compares against a
+	// stale or skipped final buffer entry.
+	if len(snapshotHistory) == 0 || snapshotHistory[len(snapshotHistory)-1].Timestamp != snapshot.Timestamp {
+		snapshotHistory = append(snapshotHistory, snapshot)
+		if len(snapshotHistory) > 10 {
+			snapshotHistory = snapshotHistory[len(snapshotHistory)-10:]
+		}
+	}
+	contextText := ai.BuildContext(snapshot, snapshotHistory)
 
 	return agent.Ask(ctx, question, contextText)
+}
+
+func (s *State) GetAIHistory(ctx context.Context) ([]domain.ChatMessage, error) {
+	s.mu.RLock()
+	agent := s.aiAgent
+	history := s.aiHistory
+	s.mu.RUnlock()
+	if history != nil {
+		return history.Load(ctx)
+	}
+	if agent == nil {
+		return nil, ErrAIUnavailable
+	}
+	return agent.History(ctx)
 }
 
 func (s *State) Subscribe() (<-chan collector.SystemSnapshot, func()) {

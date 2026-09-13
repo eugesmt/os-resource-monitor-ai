@@ -19,7 +19,7 @@ func TestBuildContextIncludesKeySections(t *testing.T) {
 	previous.MemPercent = 48
 
 	text := BuildContext(current, []collector.SystemSnapshot{previous, current})
-	for _, want := range []string{"SYSTEM STATE", "Top 5 processes", "testproc", "Change vs previous", "History over last 2 snapshots"} {
+	for _, want := range []string{"CURRENT SYSTEM STATE", "PREVIOUS SNAPSHOT", "CALCULATED CHANGES", "CPU: +20.0 percentage points", "Top 5 processes", "testproc", "SNAPSHOT HISTORY", "History over last 2 snapshots"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("context missing %q: %s", want, text)
 		}

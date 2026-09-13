@@ -30,6 +30,7 @@ type aiResponse struct {
 type historyResponse struct {
 	Items []collector.SystemSnapshot `json:"items"`
 }
+type aiHistoryResponse struct { Items []domain.ChatMessage `json:"items"` }
 
 func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +98,12 @@ func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
 			return
 		}
 		writeJSON(w, 200, aiResponse{Answer: answer})
+	})
+	mux.HandleFunc("/api/ai/history", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet { methodNotAllowed(w); return }
+		items, err := state.GetAIHistory(r.Context())
+		if err != nil { writeAPIError(w, 503, err); return }
+		writeJSON(w, http.StatusOK, aiHistoryResponse{Items: items})
 	})
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

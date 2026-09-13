@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"taskmanager-ai/internal/domain"
+
 	openai "github.com/sashabaranov/go-openai"
 )
 
@@ -30,7 +32,7 @@ func NewClient(apiKey, baseURL, model string) *Client {
 	}
 }
 
-func (c *Client) Complete(ctx context.Context, systemPrompt, userContent string) (string, error) {
+func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage) (string, error) {
 	select {
 	case c.sem <- struct{}{}:
 		defer func() { <-c.sem }()
@@ -41,12 +43,14 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userContent string)
 	requestCtx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 
+	requestMessages := make([]openai.ChatCompletionMessage, 0, len(messages)+1)
+	requestMessages = append(requestMessages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleSystem, Content: systemPrompt})
+	for _, message := range messages {
+		requestMessages = append(requestMessages, openai.ChatCompletionMessage{Role: message.Role, Content: message.Content})
+	}
 	resp, err := c.client.CreateChatCompletion(requestCtx, openai.ChatCompletionRequest{
 		Model: c.model,
-		Messages: []openai.ChatCompletionMessage{
-			{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
-			{Role: openai.ChatMessageRoleUser, Content: userContent},
-		},
+		Messages: requestMessages,
 		MaxTokens: 2000,
 		ResponseFormat: &openai.ChatCompletionResponseFormat{
 			Type: openai.ChatCompletionResponseFormatTypeJSONObject,

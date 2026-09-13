@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"taskmanager-ai/internal/collector"
 )
@@ -11,7 +12,11 @@ import (
 func BuildContext(snapshot collector.SystemSnapshot, history []collector.SystemSnapshot) string {
 	var b strings.Builder
 
-	b.WriteString("SYSTEM STATE\n\n")
+	b.WriteString("SYSTEM CONTEXT\n\n")
+	b.WriteString("CURRENT SYSTEM STATE\n")
+	if !snapshot.Timestamp.IsZero() {
+		fmt.Fprintf(&b, "Timestamp: %s\n", snapshot.Timestamp.Format(time.RFC3339Nano))
+	}
 	fmt.Fprintf(&b, "Current CPU: %.1f%%\n", snapshot.CPUPercent)
 	fmt.Fprintf(&b, "Memory: %.2f GB / %.2f GB (%.1f%%)\n", bytesToGB(snapshot.MemUsed), bytesToGB(snapshot.MemTotal), snapshot.MemPercent)
 
@@ -35,10 +40,19 @@ func BuildContext(snapshot collector.SystemSnapshot, history []collector.SystemS
 
 	if len(history) > 1 {
 		prev := history[len(history)-2]
-		fmt.Fprintf(&b, "\nChange vs previous snapshot: CPU %+.1f pp, Memory %+.1f pp\n", snapshot.CPUPercent-prev.CPUPercent, snapshot.MemPercent-prev.MemPercent)
+		b.WriteString("\nPREVIOUS SNAPSHOT\n")
+		if !prev.Timestamp.IsZero() {
+			fmt.Fprintf(&b, "Timestamp: %s\n", prev.Timestamp.Format(time.RFC3339Nano))
+		}
+		fmt.Fprintf(&b, "CPU: %.1f%%\n", prev.CPUPercent)
+		fmt.Fprintf(&b, "Memory: %.1f%%\n", prev.MemPercent)
+		b.WriteString("\nCALCULATED CHANGES\n")
+		fmt.Fprintf(&b, "CPU: %+.1f percentage points\n", snapshot.CPUPercent-prev.CPUPercent)
+		fmt.Fprintf(&b, "Memory: %+.1f percentage points\n", snapshot.MemPercent-prev.MemPercent)
 	}
 
 	if len(history) > 0 {
+		b.WriteString("\nSNAPSHOT HISTORY\n")
 		cpuAvg, cpuMin, cpuMax := stats(history, func(s collector.SystemSnapshot) float64 { return s.CPUPercent })
 		memAvg, memMin, memMax := stats(history, func(s collector.SystemSnapshot) float64 { return s.MemPercent })
 		fmt.Fprintf(&b, "\nHistory over last %d snapshots:\n", len(history))

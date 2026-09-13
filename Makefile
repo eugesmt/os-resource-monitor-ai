@@ -1,6 +1,11 @@
-.PHONY: run test race vet build tidy
+.PHONY: run migrate test race vet build tidy
 
-run:
+CHAT_DB_PATH ?= taskmanager.db
+
+migrate:
+	goose -dir migrations sqlite3 $(CHAT_DB_PATH) up
+
+run: migrate
 	go run ./cmd/server
 
 tidy:

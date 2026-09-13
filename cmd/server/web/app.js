@@ -70,9 +70,10 @@ function applySnapshot(snapshot) {
 }
 
 async function loadInitialState() {
-  const [snapshotResp, historyResp] = await Promise.all([
+  const [snapshotResp, historyResp, chatHistoryResp] = await Promise.all([
     fetch('/api/snapshot', { cache: 'no-store' }),
     fetch('/api/history?limit=120', { cache: 'no-store' }),
+    fetch('/api/ai/history', { cache: 'no-store' }),
   ]);
   if (snapshotResp.ok) applySnapshot(await snapshotResp.json());
   if (historyResp.ok) {
@@ -80,6 +81,15 @@ async function loadInitialState() {
     history = Array.isArray(payload.items) ? payload.items : [];
     $('historyCount').textContent = String(history.length);
     drawChart(history);
+  }
+  if (chatHistoryResp.ok) {
+    const payload = await chatHistoryResp.json();
+    for (const item of (Array.isArray(payload.items) ? payload.items : [])) {
+      if (item.role === 'user') addMessage('user', item.content);
+      if (item.role === 'assistant') {
+        try { addMessage('ai', formatAIAnswer(JSON.parse(item.content))); } catch { /* ignore malformed legacy rows */ }
+      }
+    }
   }
 }
 

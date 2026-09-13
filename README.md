@@ -8,6 +8,7 @@
 - `github.com/shirou/gopsutil/v3`
 - `github.com/sashabaranov/go-openai`
 - `net/http` + SSE
+- SQLite via `modernc.org/sqlite`, schema managed with Goose v3
 - HTML/CSS/Vanilla JS
 
 ## Запуск
@@ -18,6 +19,14 @@ go test ./...
 go test -race ./...
 go vet ./...
 go run ./cmd/server
+```
+
+`make run` applies pending Goose migrations to `taskmanager.db` before starting
+the server. To apply or inspect migrations separately:
+
+```bash
+make migrate CHAT_DB_PATH=taskmanager.db
+goose -dir migrations sqlite3 taskmanager.db status
 ```
 
 Затем открыть `http://127.0.0.1:8080`.
@@ -37,6 +46,7 @@ export HISTORY_SIZE=300
 export MAX_PROCESSES=100
 export DEEPSEEK_MODEL=
 export DEEPSEEK_BASE_URL=https://api.deepseek.com
+export CHAT_DB_PATH=taskmanager.db
 ```
 
 ## API
@@ -46,6 +56,7 @@ GET  /api/health
 GET  /api/snapshot
 GET  /api/history?limit=120
 POST /api/ai/ask
+GET  /api/ai/history
 GET  /api/events       # SSE live snapshots
 ```
 
