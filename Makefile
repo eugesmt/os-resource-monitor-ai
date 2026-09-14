@@ -5,7 +5,7 @@ CHAT_DB_PATH ?= taskmanager.db
 migrate:
 	goose -dir migrations sqlite3 $(CHAT_DB_PATH) up
 
-run: migrate
+run:
 	go run ./cmd/server
 
 tidy:

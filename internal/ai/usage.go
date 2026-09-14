@@ -94,6 +94,7 @@ func contextStatusForProvider(input int, config UsageConfig) string {
 	return "within_limit"
 }
 
-func intPtr(v int) *int { return &v }
+func intPtr(v int) *int           { return &v }
+func floatPtr(v float64) *float64 { return &v }
 
 func usageCallID() uint64 { return callSequence.Add(1) }

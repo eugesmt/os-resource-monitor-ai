@@ -86,6 +86,14 @@
           <div class="panel-hint">DeepSeek анализирует текущие системные метрики</div>
         </div>
       </div>
+      <div class="context-toolbar">
+        <span id="contextStrategy" class="strategy-badge">Стратегия: —</span>
+        <span id="contextBranch" class="context-chip">Ветка: —</span>
+        <label id="branchControl" class="context-chip hidden">Ветка <select id="branchSelect" aria-label="Активная ветка"></select></label>
+        <button id="newBranchBtn" class="secondary-button hidden" type="button">Новая ветка</button>
+      </div>
+      <div id="contextMetrics" class="context-metrics" aria-live="polite">Контекст ещё не использован</div>
+      <div id="stickyFacts" class="sticky-facts hidden"><span class="metric-label">STICKY FACTS</span><div id="factsList" class="facts-list"></div></div>
       <div id="chat" class="chat" aria-live="polite">
         <div class="message ai">Привет. Я вижу текущие метрики этой машины. Например, спроси: «Почему сейчас высокая загрузка CPU?»</div>
       </div>

@@ -2,6 +2,8 @@ const $ = (id) => document.getElementById(id);
 let history = [];
 let aiBusy = false;
 let events = null;
+let activeBranch = 0;
+let activeStrategy = '';
 
 const COLORS = { grid: '#24303c', label: '#738095', cpu: '#79a9ec', mem: '#8fd1b0' };
 
@@ -70,10 +72,20 @@ function applySnapshot(snapshot) {
 }
 
 async function loadInitialState() {
+  const contextResp = await fetch('/api/ai/context', { cache: 'no-store' });
+  if (contextResp.ok) {
+    const context = await contextResp.json();
+    activeStrategy = String(context.context_strategy || 'sliding_window');
+    activeBranch = Number(context.scope?.branch_id || 0);
+    $('contextStrategy').textContent = `Стратегия: ${strategyLabel(activeStrategy)}`;
+    $('contextBranch').textContent = `Ветка: ${activeBranch || '—'}`;
+  }
+  await loadBranches();
+  await loadFacts();
   const [snapshotResp, historyResp, chatHistoryResp] = await Promise.all([
     fetch('/api/snapshot', { cache: 'no-store' }),
     fetch('/api/history?limit=120', { cache: 'no-store' }),
-    fetch('/api/ai/history', { cache: 'no-store' }),
+    fetch(`/api/ai/history${activeBranch ? `?branch_id=${activeBranch}` : ''}`, { cache: 'no-store' }),
   ]);
   if (snapshotResp.ok) applySnapshot(await snapshotResp.json());
   if (historyResp.ok) {
@@ -87,10 +99,43 @@ async function loadInitialState() {
     for (const item of (Array.isArray(payload.items) ? payload.items : [])) {
       if (item.role === 'user') addMessage('user', item.content);
       if (item.role === 'assistant') {
-        try { addMessage('ai', formatAIAnswer(JSON.parse(item.content)), item.usage); } catch { /* ignore malformed legacy rows */ }
+        try { addMessage('ai', formatAIAnswer(JSON.parse(item.content)), item.usage, item.id); } catch { /* ignore malformed legacy rows */ }
       }
     }
   }
+}
+
+function strategyLabel(strategy) {
+  return ({ sliding_window: 'Sliding Window', sticky_facts: 'Sticky Facts', branching: 'Branching' })[strategy] || strategy;
+}
+
+async function loadFacts() {
+  const panel = $('stickyFacts');
+  if (activeStrategy !== 'sticky_facts') { panel.classList.add('hidden'); return; }
+  const response = await fetch(`/api/ai/facts${activeBranch ? `?branch_id=${activeBranch}` : ''}`, { cache: 'no-store' });
+  if (!response.ok) return;
+  const payload = await response.json();
+  const facts = (payload.items || []).filter((fact) => fact.state === 'active');
+  $('factsList').replaceChildren();
+  for (const fact of facts) { const pill = document.createElement('span'); pill.className = 'fact-pill'; pill.textContent = `${fact.fact_key}: ${fact.value_text || '—'}`; $('factsList').appendChild(pill); }
+  if (facts.length === 0) { const empty = document.createElement('span'); empty.className = 'panel-hint'; empty.textContent = 'Пока нет закреплённых фактов'; $('factsList').appendChild(empty); }
+  panel.classList.remove('hidden');
+}
+
+async function loadBranches() {
+  const response = await fetch('/api/ai/branches', { cache: 'no-store' });
+  if (!response.ok) return;
+  const payload = await response.json();
+  activeBranch = Number(payload.active_branch_id || activeBranch || 0);
+  $('contextBranch').textContent = `Ветка: ${activeBranch || '—'}`;
+  const select = $('branchSelect');
+  if (activeStrategy !== 'branching') { $('branchControl').classList.add('hidden'); $('newBranchBtn').classList.add('hidden'); return; }
+  $('branchControl').classList.remove('hidden'); $('newBranchBtn').classList.remove('hidden');
+  if (!select) return;
+  select.replaceChildren();
+  for (const branch of (payload.items || [])) { const option = document.createElement('option'); option.value = branch.id; option.textContent = branch.name || `Ветка ${branch.id}`; option.selected = Number(branch.id) === activeBranch; select.appendChild(option); }
+  select.onchange = async () => { const id = Number(select.value); const version = Number(payload.version || 1); const r = await fetch('/api/ai/branches/active', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({branch_id:id,expected_version:version}) }); if (r.ok) { activeBranch=id; window.location.reload(); } };
+  $('newBranchBtn').onclick = async () => { const checkpointID = Number(window.prompt('ID checkpoint для новой ветки:')); if (!checkpointID) return; const name = window.prompt('Название ветки:', 'Эксперимент') || 'Эксперимент'; const r = await fetch('/api/ai/branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({checkpoint_id:checkpointID,name,activate:true}) }); if (r.ok) window.location.reload(); };
 }
 
 function usageValue(value) { return value == null ? '—' : String(value); }
@@ -98,11 +143,15 @@ function usageValue(value) { return value == null ? '—' : String(value); }
 function formatAIUsage(usage) {
   if (!usage || typeof usage !== 'object') return null;
   const parts = [
-    `Запрос ≈${usageValue(usage.current_request_tokens)}`,
-    `История ≈${usageValue(usage.history_tokens)}`,
-    `Вход ${usageValue(usage.input_tokens)}`,
-    `Ответ ${usageValue(usage.output_tokens)}`,
-    `Всего ${usageValue(usage.total_tokens)}`,
+	`Стратегия ${usage.context_strategy || '—'}`,
+	`Ветка ${usageValue(usage.branch_id)}`,
+		`Запрос ≈${usageValue(usage.current_request_tokens)}`,
+		`История ≈${usageValue(usage.history_tokens)}`,
+		`Сообщений ${usageValue(usage.provider_message_count)} / история ${usageValue(usage.history_message_count)}`,
+		`Сервисный контекст ≈${usageValue(usage.service_context_tokens)}`,
+		`Вход ${usageValue(usage.input_tokens)}`,
+		`Ответ ${usageValue(usage.output_tokens)}`,
+		`Всего ${usageValue(usage.total_tokens)}`,
   ];
   if (usage.history_compacted) parts.push(`До сжатия ≈${usageValue(usage.estimated_uncompressed_input_tokens)} · После ≈${usageValue(usage.estimated_input_tokens)} · Экономия ≈${usageValue(usage.estimated_tokens_saved)} (${usage.estimated_uncompressed_input_tokens > 0 && usage.estimated_tokens_saved > 0 ? Math.round(usage.estimated_tokens_saved / usage.estimated_uncompressed_input_tokens * 100) + '%' : '—'})`);
   if (usage.estimated_cost_usd != null) parts.push(`≈$${Number(usage.estimated_cost_usd).toFixed(6)}`);
@@ -111,8 +160,14 @@ function formatAIUsage(usage) {
 
 function formatAIUsageDetails(usage) {
   const lines = [
-    `Запрос: ≈${usageValue(usage.current_request_tokens)} токенов`,
-    `История: ≈${usageValue(usage.history_tokens)} токенов`,
+		`Стратегия: ${usage.context_strategy || '—'}`,
+		`Ветка: ${usageValue(usage.branch_id)}`,
+		`Запрос: ≈${usageValue(usage.current_request_tokens)} токенов`,
+		`История: ≈${usageValue(usage.history_tokens)} токенов`,
+		`Сообщений провайдеру: ${usageValue(usage.provider_message_count)}`,
+		`Сохранённых сообщений в контексте: ${usageValue(usage.history_message_count)}`,
+		`Сервисный контекст: ≈${usageValue(usage.service_context_tokens)} токенов`,
+		`Facts: ${usageValue(usage.facts_count)} · ≈${usageValue(usage.facts_tokens)} токенов`,
     `Системный prompt: ≈${usageValue(usage.system_prompt_tokens)} токенов`,
     `Расчётный вход: ≈${usageValue(usage.estimated_input_tokens)} токенов`,
     `Сводка: ≈${usageValue(usage.summary_tokens)} · Последние сообщения: ≈${usageValue(usage.recent_history_tokens)} токенов`,
@@ -120,6 +175,8 @@ function formatAIUsageDetails(usage) {
     `Ответ: ${usageValue(usage.output_tokens)} токенов`,
     `Всего: ${usageValue(usage.total_tokens)} токенов`,
   ];
+	if (usage.auxiliary_input_tokens != null || usage.auxiliary_output_tokens != null || usage.auxiliary_total_tokens != null) lines.push(`Extractor: ${usageValue(usage.auxiliary_input_tokens)} / ${usageValue(usage.auxiliary_output_tokens)} / ${usageValue(usage.auxiliary_total_tokens)}`);
+	if (usage.aggregate_total_tokens != null) lines.push(`Aggregate: ${usageValue(usage.aggregate_input_tokens)} / ${usageValue(usage.aggregate_output_tokens)} / ${usageValue(usage.aggregate_total_tokens)}`);
   if (usage.estimated_cost_usd != null) {
     lines.push(`Стоимость: ≈$${Number(usage.estimated_cost_usd).toFixed(6)}`);
   }
@@ -164,14 +221,19 @@ function addUsageMetadata(node, usage) {
   }
 }
 
-function addMessage(role, text, usage) {
+function addMessage(role, text, usage, messageID) {
   const node = document.createElement('div');
   node.className = `message ${role}`;
   const content = document.createElement('div');
   content.className = 'message-content';
   content.textContent = text;
   node.appendChild(content);
-  if (role === 'ai') addUsageMetadata(node, usage);
+  if (role === 'ai') { addUsageMetadata(node, usage); renderContextMetrics(usage); }
+  if (role === 'ai' && activeStrategy === 'branching' && messageID) {
+    const checkpoint = document.createElement('button'); checkpoint.type = 'button'; checkpoint.className = 'checkpoint-button'; checkpoint.textContent = 'Создать checkpoint';
+    checkpoint.onclick = async () => { const label = window.prompt('Метка checkpoint:', 'Точка продолжения') || ''; const response = await fetch('/api/ai/checkpoints', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({branch_id:activeBranch,message_id:messageID,label}) }); if (response.ok) { checkpoint.textContent='Checkpoint создан'; checkpoint.disabled=true; } };
+    node.appendChild(checkpoint);
+  }
   $('chat').appendChild(node);
   $('chat').scrollTop = $('chat').scrollHeight;
 }
@@ -319,7 +381,7 @@ $('askForm').addEventListener('submit', async (event) => {
     const response = await fetch('/api/ai/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, ...(activeBranch ? {branch_id: activeBranch} : {}) }),
     });
     const payload = await response.json();
     if (!response.ok) {
@@ -330,6 +392,10 @@ $('askForm').addEventListener('submit', async (event) => {
       throw new Error(payload.error || 'AI request failed');
     }
     addMessage('ai', formatAIAnswer(payload.answer), payload.usage);
+    $('contextStrategy').textContent = `Стратегия: ${strategyLabel(payload.context_strategy || activeStrategy)}`;
+    if (payload.branch_id) { activeBranch = Number(payload.branch_id); $('contextBranch').textContent = `Ветка: ${activeBranch}`; }
+    renderContextMetrics(payload.usage);
+    if (activeStrategy === 'sticky_facts') await loadFacts();
   } catch (error) {
     $('aiError').textContent = error instanceof Error ? error.message : 'Не удалось получить ответ AI';
   } finally {
@@ -339,6 +405,15 @@ $('askForm').addEventListener('submit', async (event) => {
     $('question').focus();
   }
 });
+
+function renderContextMetrics(usage) {
+  if (!usage) return;
+  const items = [`история ${usage.history_message_count ?? '—'} сообщ.`, `всего ${usage.provider_message_count ?? '—'} сообщ.`, `≈${usage.service_context_tokens ?? 0} service tokens`];
+  if (activeStrategy === 'sliding_window') items.push(`обрезка: ${usage.history_truncated ? 'да' : 'нет'}`);
+  if (activeStrategy === 'sticky_facts') items.push(`facts: ${usage.facts_count ?? 0}`);
+  if (activeStrategy === 'branching') items.push('sibling isolation: включена');
+  $('contextMetrics').textContent = items.join(' · ');
+}
 
 $('question').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) {

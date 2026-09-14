@@ -16,6 +16,7 @@ import (
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/storage"
 )
 
 type apiError struct {
@@ -23,10 +24,13 @@ type apiError struct {
 }
 type aiRequest struct {
 	Question string `json:"question"`
+	BranchID int64  `json:"branch_id,omitempty"`
 }
 type aiResponse struct {
-	Answer *domain.AnalysisResponse `json:"answer"`
-	Usage  domain.AICallUsage       `json:"usage"`
+	Answer          *domain.AnalysisResponse   `json:"answer"`
+	Usage           domain.AICallUsage         `json:"usage"`
+	BranchID        int64                      `json:"branch_id,omitempty"`
+	ContextStrategy domain.ContextStrategyName `json:"context_strategy,omitempty"`
 }
 type aiUsageErrorResponse struct {
 	Error string             `json:"error"`
@@ -37,6 +41,21 @@ type historyResponse struct {
 }
 type aiHistoryResponse struct {
 	Items []domain.ChatMessage `json:"items"`
+}
+
+type branchRequest struct {
+	CheckpointID int64  `json:"checkpoint_id"`
+	Name         string `json:"name"`
+	Activate     bool   `json:"activate"`
+}
+type checkpointRequest struct {
+	BranchID  int64  `json:"branch_id"`
+	MessageID int64  `json:"message_id"`
+	Label     string `json:"label"`
+}
+type activeBranchRequest struct {
+	BranchID        int64 `json:"branch_id"`
+	ExpectedVersion int64 `json:"expected_version"`
 }
 
 func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
@@ -90,7 +109,7 @@ func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), ai.RequestTimeout)
 		defer cancel()
-		answer, usage, err := state.AskAI(ctx, req.Question)
+		answer, usage, err := state.AskAI(ctx, req.Question, req.BranchID)
 		if err != nil {
 			if errors.Is(err, ai.ErrContextWindowExceeded) {
 				state.log.Error("AI request failed", "error", err)
@@ -111,19 +130,168 @@ func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
 			writeAPIError(w, status, publicErr)
 			return
 		}
-		writeJSON(w, 200, aiResponse{Answer: answer, Usage: usage})
+		writeJSON(w, 200, aiResponse{Answer: answer, Usage: usage, BranchID: usage.BranchID, ContextStrategy: usage.ContextStrategy})
 	})
 	mux.HandleFunc("/api/ai/history", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
 			return
 		}
-		items, err := state.GetAIHistory(r.Context())
+		var branchID int64
+		if raw := r.URL.Query().Get("branch_id"); raw != "" {
+			branchID, _ = strconv.ParseInt(raw, 10, 64)
+		}
+		items, err := state.GetAIHistory(r.Context(), branchID)
 		if err != nil {
 			writeAPIError(w, 503, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, aiHistoryResponse{Items: items})
+	})
+	mux.HandleFunc("/api/ai/context", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		info, err := state.ContextInfo(r.Context())
+		if err != nil {
+			writeAPIError(w, 503, err)
+			return
+		}
+		writeJSON(w, 200, info)
+	})
+	mux.HandleFunc("/api/ai/facts", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet { methodNotAllowed(w); return }
+		store, ok := state.BranchStore().(interface { GetActiveScope(context.Context) (domain.ContextScope,error); ResolveScope(context.Context,int64) (domain.ContextScope,error); ListFacts(context.Context,int64,int64) ([]domain.DialogueFact,error) })
+		if !ok { writeAPIError(w,503,errors.New("fact storage unavailable")); return }
+		scope, err := store.GetActiveScope(r.Context()); if err != nil { writeAPIError(w,503,err); return }
+		if raw:=r.URL.Query().Get("branch_id"); raw!="" { if id,e:=strconv.ParseInt(raw,10,64); e==nil && id>0 { scope,err=store.ResolveScope(r.Context(),id) } }
+		if err != nil { writeAPIError(w,400,err); return }; facts,err:=store.ListFacts(r.Context(),scope.ConversationID,scope.BranchID);if err!=nil{writeAPIError(w,503,err);return};writeJSON(w,200,map[string]any{"items":facts,"branch_id":scope.BranchID})
+	})
+	mux.HandleFunc("/api/ai/branches", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && state.ContextStrategy() != domain.ContextStrategyBranching {
+			writeJSON(w, http.StatusConflict, apiError{Error: "strategy_not_active"})
+			return
+		}
+		store, ok := state.BranchStore().(interface {
+			GetActiveScope(context.Context) (domain.ContextScope, error)
+			ListBranches(context.Context, int64) ([]domain.DialogueBranch, error)
+			CreateBranch(context.Context, int64, int64, string, bool) (domain.DialogueBranch, error)
+		})
+		if !ok {
+			writeAPIError(w, 503, errors.New("branch storage unavailable"))
+			return
+		}
+		scope, err := store.GetActiveScope(r.Context())
+		if err != nil {
+			writeAPIError(w, 503, err)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			branches, err := store.ListBranches(r.Context(), scope.ConversationID)
+			if err != nil {
+				writeAPIError(w, 503, err)
+				return
+			}
+			writeJSON(w, 200, map[string]any{"items": branches, "active_branch_id": scope.BranchID, "version": scope.Version})
+		case http.MethodPost:
+			defer r.Body.Close()
+			var req branchRequest
+			if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req) != nil {
+				writeAPIError(w, 400, errors.New("invalid JSON body"))
+				return
+			}
+			if req.CheckpointID <= 0 {
+				writeAPIError(w, 400, errors.New("checkpoint_id is required"))
+				return
+			}
+			b, err := store.CreateBranch(r.Context(), scope.ConversationID, req.CheckpointID, req.Name, req.Activate)
+			if err != nil {
+				writeAPIError(w, 400, err)
+				return
+			}
+			writeJSON(w, 201, b)
+		default:
+			methodNotAllowed(w)
+		}
+	})
+	mux.HandleFunc("/api/ai/checkpoints", func(w http.ResponseWriter, r *http.Request) {
+		if state.ContextStrategy() != domain.ContextStrategyBranching {
+			writeJSON(w, http.StatusConflict, apiError{Error: "strategy_not_active"})
+			return
+		}
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		store, ok := state.BranchStore().(interface {
+			GetActiveScope(context.Context) (domain.ContextScope, error)
+			CreateCheckpoint(context.Context, int64, int64, int64, string) (domain.DialogueCheckpoint, error)
+		})
+		if !ok {
+			writeAPIError(w, 503, errors.New("branch storage unavailable"))
+			return
+		}
+		scope, err := store.GetActiveScope(r.Context())
+		if err != nil {
+			writeAPIError(w, 503, err)
+			return
+		}
+		defer r.Body.Close()
+		var req checkpointRequest
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req) != nil {
+			writeAPIError(w, 400, errors.New("invalid JSON body"))
+			return
+		}
+		if req.BranchID == 0 {
+			req.BranchID = scope.BranchID
+		}
+		cp, err := store.CreateCheckpoint(r.Context(), scope.ConversationID, req.BranchID, req.MessageID, req.Label)
+		if err != nil {
+			writeAPIError(w, 400, err)
+			return
+		}
+		writeJSON(w, 201, cp)
+	})
+	mux.HandleFunc("/api/ai/branches/active", func(w http.ResponseWriter, r *http.Request) {
+		if state.ContextStrategy() != domain.ContextStrategyBranching {
+			writeJSON(w, http.StatusConflict, apiError{Error: "strategy_not_active"})
+			return
+		}
+		if r.Method != http.MethodPut {
+			methodNotAllowed(w)
+			return
+		}
+		store, ok := state.BranchStore().(interface {
+			GetActiveScope(context.Context) (domain.ContextScope, error)
+			SetActiveBranch(context.Context, int64, int64, int64) (domain.ContextScope, error)
+		})
+		if !ok {
+			writeAPIError(w, 503, errors.New("branch storage unavailable"))
+			return
+		}
+		scope, err := store.GetActiveScope(r.Context())
+		if err != nil {
+			writeAPIError(w, 503, err)
+			return
+		}
+		defer r.Body.Close()
+		var req activeBranchRequest
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req) != nil {
+			writeAPIError(w, 400, errors.New("invalid JSON body"))
+			return
+		}
+		next, err := store.SetActiveBranch(r.Context(), scope.ConversationID, req.BranchID, req.ExpectedVersion)
+		if err != nil {
+			if errors.Is(err, storage.ErrStaleBranchVersion) {
+				writeAPIError(w, 409, err)
+			} else {
+				writeAPIError(w, 400, err)
+			}
+			return
+		}
+		writeJSON(w, 200, next)
 	})
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

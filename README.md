@@ -20,8 +20,8 @@ go vet ./...
 go run ./cmd/server
 ```
 
-`make run` applies pending Goose migrations to `taskmanager.db` before starting
-the server. To apply or inspect migrations separately:
+Migrations are not applied automatically at startup. Apply or inspect them
+separately:
 
 ```bash
 make migrate CHAT_DB_PATH=taskmanager.db
@@ -47,16 +47,10 @@ export DEEPSEEK_MODEL=
 export DEEPSEEK_BASE_URL=https://api.deepseek.com
 export CHAT_DB_PATH=taskmanager.db
 export AI_CONTEXT_WINDOW_TOKENS=128000
-export AI_RECENT_MESSAGES_LIMIT=20
-export AI_SUMMARIZATION_BATCH_SIZE=10
-export AI_MAX_SUMMARY_TOKENS=800
-export AI_SUMMARIZATION_MODEL=deepseek-v4-flash
-
-Диалоговая история сохраняется полностью. При превышении `AI_RECENT_MESSAGES_LIMIT`
-старые сообщения последовательно сворачиваются rolling summary батчами не больше
-`AI_SUMMARIZATION_BATCH_SIZE`; последняя неполная batch также обрабатывается перед
-основным вызовом. Summary не является transcript-сообщением. Goose migrations
-применяются явно к базе командой `goose -dir migrations sqlite3 <db> up`.
+export AI_CONTEXT_STRATEGY=sliding_window
+export AI_CONTEXT_RECENT_MESSAGES_LIMIT=20
+export AI_FACT_MODEL=deepseek-v4-flash
+export AI_FACT_MAX_ITEMS=32
 export AI_INPUT_PRICE_PER_MILLION_TOKENS=0.14
 export AI_OUTPUT_PRICE_PER_MILLION_TOKENS=0.28
 ```
@@ -73,7 +67,12 @@ GET  /api/health
 GET  /api/snapshot
 GET  /api/history?limit=120
 POST /api/ai/ask
-GET  /api/ai/history
+GET  /api/ai/context
+GET  /api/ai/history?branch_id=1
+GET  /api/ai/branches
+POST /api/ai/checkpoints
+POST /api/ai/branches
+PUT  /api/ai/branches/active
 GET  /api/events       # SSE live snapshots
 ```
 
@@ -86,12 +85,11 @@ and `estimated_input_tokens`, provider-reported nullable `input_tokens`,
 endpoint returns the same usage object on persisted assistant messages; legacy
 messages have no usage metadata.
 
-The application sends the complete dialogue history on every request. It does
-not prune, summarize, truncate, or clear history automatically. Therefore
-`history_truncated=false` describes application behavior, not undocumented
-provider internals. A context rejection is returned as HTTP 422 with a safe
-diagnostic and does not create a failed chat turn. `finish_reason=length` is a
-separate output-truncation outcome.
+`AI_CONTEXT_STRATEGY` selects `sliding_window`, `sticky_facts`, or `branching`
+at startup. Raw messages remain persisted; the selected strategy controls only
+the model context. Summary tables remain legacy data and are not read by the
+new managers. A context rejection is returned as HTTP 422 with a safe
+diagnostic and does not create a failed chat turn.
 
 Each started provider request emits one structured `AI model call` info event.
 Events contain call id, model, outcome, duration, estimates, exact usage when

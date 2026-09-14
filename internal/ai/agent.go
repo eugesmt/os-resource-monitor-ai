@@ -8,7 +8,6 @@ import (
 	"math"
 	"strings"
 	"sync"
-	"time"
 
 	"taskmanager-ai/internal/domain"
 )
@@ -63,31 +62,19 @@ type ContextStore interface {
 }
 
 type Agent struct {
-	systemPrompt     string
-	completion       completion
-	history          HistoryStore
-	summarizer       Summarizer
-	recentLimit      int
-	batchSize        int
-	maxSummaryTokens int
-	mu               sync.Mutex
-}
-
-type contextMetrics struct {
-	summary, recent, uncompressed int
-	compacted                     bool
+	systemPrompt string
+	completion   completion
+	history      HistoryStore
+	manager      ContextManager
+	mu           sync.Mutex
 }
 
 func NewAgent(client *Client, prompt string, history HistoryStore) *Agent {
-	return NewConfiguredAgent(client, prompt, history, 20, 10, 800, "")
+	return newAgent(client, prompt, history)
 }
 
 func NewConfiguredAgent(client *Client, prompt string, history HistoryStore, recentLimit, batchSize, maxSummaryTokens int, summaryModel string) *Agent {
-	a := &Agent{completion: client, systemPrompt: strings.TrimSpace(prompt), history: history, recentLimit: recentLimit, batchSize: batchSize, maxSummaryTokens: maxSummaryTokens}
-	if client != nil {
-		a.summarizer = NewSummarizer(client, summaryModel, maxSummaryTokens)
-	}
-	return a
+	return newAgent(client, prompt, history)
 }
 
 func newAgent(completion completion, prompt string, history ...HistoryStore) *Agent {
@@ -95,10 +82,26 @@ func newAgent(completion completion, prompt string, history ...HistoryStore) *Ag
 	if len(history) > 0 {
 		store = history[0]
 	}
-	return &Agent{completion: completion, systemPrompt: strings.TrimSpace(prompt), history: store, recentLimit: 20, batchSize: 10, maxSummaryTokens: 800}
+	a := &Agent{completion: completion, systemPrompt: strings.TrimSpace(prompt), history: store}
+	if store != nil {
+		a.manager = &legacyManager{history: store, limit: 20}
+	}
+	return a
+}
+
+func NewAgentWithContextManager(completion completion, prompt string, history HistoryStore, manager ContextManager) *Agent {
+	return &Agent{completion: completion, systemPrompt: strings.TrimSpace(prompt), history: history, manager: manager}
 }
 
 func (a *Agent) Ask(ctx context.Context, question, contextText string) (*domain.AnalysisResponse, domain.AICallUsage, error) {
+	return a.ask(ctx, question, contextText, 0)
+}
+
+func (a *Agent) AskOnBranch(ctx context.Context, question, contextText string, branchID int64) (*domain.AnalysisResponse, domain.AICallUsage, error) {
+	return a.ask(ctx, question, contextText, branchID)
+}
+
+func (a *Agent) ask(ctx context.Context, question, contextText string, branchID int64) (*domain.AnalysisResponse, domain.AICallUsage, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
 		return nil, domain.AICallUsage{}, errors.New("question is empty")
@@ -108,34 +111,77 @@ func (a *Agent) Ask(ctx context.Context, question, contextText string) (*domain.
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	var messages []domain.ChatMessage
-	metrics := contextMetrics{}
-	if a.history != nil {
-		if cs, ok := a.history.(ContextStore); ok && a.summarizer != nil {
+	var prepared PreparedContext
+	if a.manager != nil {
+		scope := domain.ContextScope{}
+		if bs, ok := a.history.(interface {
+			GetActiveScope(context.Context) (domain.ContextScope, error)
+		}); ok {
 			var err error
-			messages, metrics, err = a.prepareContext(ctx, cs)
+			scope, err = bs.GetActiveScope(ctx)
 			if err != nil {
 				return nil, domain.AICallUsage{}, err
 			}
-		} else {
-			var err error
-			messages, err = a.history.Load(ctx)
-			if err != nil {
-				return nil, domain.AICallUsage{}, fmt.Errorf("load chat history: %w", err)
+			if branchID != 0 {
+				resolver, ok := a.history.(interface {
+					ResolveScope(context.Context, int64) (domain.ContextScope, error)
+				})
+				if !ok {
+					return nil, domain.AICallUsage{}, errors.New("branch selection unavailable")
+				}
+				scope, err = resolver.ResolveScope(ctx, branchID)
+				if err != nil {
+					return nil, domain.AICallUsage{}, err
+				}
 			}
 		}
+		var err error
+		prepared, err = a.manager.Prepare(ctx, scope, question)
+		if err != nil {
+			return nil, domain.AICallUsage{}, err
+		}
 	}
+	messages := prepared.Messages
 
 	userContent := fmt.Sprintf("CURRENT REQUEST\n\nSYSTEM CONTEXT (authoritative source for metrics):\n%s\n\nUSER QUESTION:\n%s\n\nUse previous messages only as DIALOGUE HISTORY for understanding the question. Do not use numbers from previous AI answers as system metrics.", contextText, question)
 	messages = append(messages, domain.ChatMessage{Role: domain.ChatRoleUser, Content: userContent})
 	completion, err := a.completion.Complete(ctx, a.systemPrompt, messages)
-	if metrics.compacted {
-		completion.Usage.SummaryTokens = metrics.summary
-		completion.Usage.RecentHistoryTokens = metrics.recent
-		completion.Usage.UncompressedHistoryTokens = metrics.uncompressed
-		completion.Usage.EstimatedUncompressedInputTokens = completion.Usage.SystemPromptTokens + metrics.uncompressed + completion.Usage.CurrentRequestTokens
-		completion.Usage.EstimatedTokensSaved = completion.Usage.EstimatedUncompressedInputTokens - completion.Usage.EstimatedInputTokens
-		completion.Usage.HistoryCompacted = true
+	completion.Usage.ContextStrategy = a.managerName()
+	completion.Usage.HistoryMessageCount = prepared.Metrics.HistoryMessageCount
+	completion.Usage.ProviderMessageCount = len(messages) + 2
+	completion.Usage.ServiceContextTokens = prepared.Metrics.ServiceContextTokens
+	completion.Usage.FactsCount = prepared.Metrics.FactsCount
+	completion.Usage.FactsTokens = prepared.Metrics.FactsTokens
+	completion.Usage.BranchMetadataTokens = prepared.Metrics.BranchMetadataTokens
+	completion.Usage.HistoryTruncated = prepared.Metrics.HistoryTruncated
+	completion.Usage.BranchID = prepared.Scope.BranchID
+	if prepared.AuxiliaryUsage.InputTokens != nil {
+		completion.Usage.AuxiliaryInputTokens = intPtr(*prepared.AuxiliaryUsage.InputTokens)
+	}
+	if prepared.AuxiliaryUsage.OutputTokens != nil {
+		completion.Usage.AuxiliaryOutputTokens = intPtr(*prepared.AuxiliaryUsage.OutputTokens)
+	}
+	if prepared.AuxiliaryUsage.TotalTokens != nil {
+		completion.Usage.AuxiliaryTotalTokens = intPtr(*prepared.AuxiliaryUsage.TotalTokens)
+	}
+	if prepared.AuxiliaryUsage.EstimatedCostUSD != nil {
+		completion.Usage.AuxiliaryCostUSD = floatPtr(*prepared.AuxiliaryUsage.EstimatedCostUSD)
+	}
+	if completion.Usage.InputTokens != nil && completion.Usage.AuxiliaryInputTokens != nil {
+		v := *completion.Usage.InputTokens + *completion.Usage.AuxiliaryInputTokens
+		completion.Usage.AggregateInputTokens = intPtr(v)
+	}
+	if completion.Usage.OutputTokens != nil && completion.Usage.AuxiliaryOutputTokens != nil {
+		v := *completion.Usage.OutputTokens + *completion.Usage.AuxiliaryOutputTokens
+		completion.Usage.AggregateOutputTokens = intPtr(v)
+	}
+	if completion.Usage.TotalTokens != nil && completion.Usage.AuxiliaryTotalTokens != nil {
+		v := *completion.Usage.TotalTokens + *completion.Usage.AuxiliaryTotalTokens
+		completion.Usage.AggregateTotalTokens = intPtr(v)
+	}
+	if completion.Usage.EstimatedCostUSD != nil && completion.Usage.AuxiliaryCostUSD != nil {
+		v := *completion.Usage.EstimatedCostUSD + *completion.Usage.AuxiliaryCostUSD
+		completion.Usage.AggregateCostUSD = floatPtr(v)
 	}
 	if err != nil {
 		return nil, completion.Usage, err
@@ -147,7 +193,11 @@ func (a *Agent) Ask(ctx context.Context, question, contextText string) (*domain.
 	if err := validateAnalysisResponse(result, len([]byte(completion.Content))); err != nil {
 		return nil, completion.Usage, err
 	}
-	if a.history != nil {
+	if a.manager != nil {
+		if err := a.manager.Commit(ctx, prepared, question, completion.Content, completion.Usage); err != nil {
+			return nil, completion.Usage, fmt.Errorf("persist chat history: %w", err)
+		}
+	} else if a.history != nil {
 		if err := a.history.AppendTurn(ctx, question, completion.Content, completion.Usage); err != nil {
 			return nil, completion.Usage, fmt.Errorf("persist chat history: %w", err)
 		}
@@ -155,88 +205,13 @@ func (a *Agent) Ask(ctx context.Context, question, contextText string) (*domain.
 	return &result, completion.Usage, nil
 }
 
-func (a *Agent) prepareContext(ctx context.Context, store ContextStore) ([]domain.ChatMessage, contextMetrics, error) {
-	allRecent, err := store.LoadRecentMessages(ctx, a.recentLimit+2)
-	if err != nil {
-		return nil, contextMetrics{}, fmt.Errorf("load recent chat messages: %w", err)
+func (a *Agent) managerName() domain.ContextStrategyName {
+	if a.manager == nil {
+		return ""
 	}
-	if len(allRecent) <= a.recentLimit {
-		return allRecent, contextMetrics{}, nil
-	}
-	recent := allRecent[len(allRecent)-a.recentLimit:]
-	cutoff := recent[0].ID
-	state, err := store.LoadSummaryState(ctx)
-	if err != nil {
-		return nil, contextMetrics{}, fmt.Errorf("load summary state: %w", err)
-	}
-	if state != nil && state.RecentMessagesLimit != a.recentLimit {
-		return nil, contextMetrics{}, fmt.Errorf("summary recent limit incompatible with configuration")
-	}
-	if state != nil && state.SummaryTokensEstimate > a.maxSummaryTokens {
-		return nil, contextMetrics{}, fmt.Errorf("summary token limit incompatible with configuration")
-	}
-	for {
-		cursor := int64(0)
-		var previous *domain.DialogueSummary
-		previousContent := ""
-		sourceCount := 0
-		sourceTokens := 0
-		version := int64(1)
-		if state != nil {
-			cursor = state.LastMessageID
-			previous = state
-			previousContent = state.Content
-			sourceCount = state.SourceMessageCount
-			sourceTokens = state.SourceTokensEstimate
-			version = state.Version + 1
-		}
-		batch, err := store.LoadSummaryBatch(ctx, cursor, cutoff, a.batchSize)
-		if err != nil {
-			return nil, contextMetrics{}, fmt.Errorf("load summary batch: %w", err)
-		}
-		if len(batch) == 0 {
-			break
-		}
-		res, err := a.summarizer.Update(ctx, previousContent, batch)
-		res.Usage.PreviousLastMessageID = cursor
-		if err != nil {
-			_ = store.RecordSummaryAttempt(ctx, res.Usage)
-			return nil, contextMetrics{}, fmt.Errorf("update dialogue summary: %w", err)
-		}
-		for _, m := range batch {
-			sourceTokens += estimateTokens(m.Role, m.Content)
-		}
-		sourceCount += len(batch)
-		next := domain.DialogueSummary{Content: res.Content, LastMessageID: batch[len(batch)-1].ID, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), SourceMessageCount: sourceCount, SourceTokensEstimate: sourceTokens, SummaryTokensEstimate: res.Usage.ResultSummaryTokens, RecentMessagesLimit: a.recentLimit, Version: version}
-		res.Usage.ThroughMessageID = next.LastMessageID
-		res.Usage.SummarySaved = true
-		if err := store.SaveSummary(ctx, previous, next, res.Usage); err != nil {
-			return nil, contextMetrics{}, fmt.Errorf("save dialogue summary: %w", err)
-		}
-		state = &next
-	}
-	state, err = store.LoadSummaryState(ctx)
-	if err != nil {
-		return nil, contextMetrics{}, err
-	}
-	result := make([]domain.ChatMessage, 0, a.recentLimit+2)
-	metrics := contextMetrics{compacted: state != nil}
-	if state != nil {
-		metrics.summary = state.SummaryTokensEstimate
-		metrics.uncompressed = state.SourceTokensEstimate
-	}
-	for _, m := range recent {
-		metrics.recent += estimateTokens(m.Role, m.Content)
-	}
-	if state != nil {
-		metrics.uncompressed += metrics.recent
-	}
-	if state != nil {
-		result = append(result, domain.ChatMessage{Role: "system", Content: "DIALOGUE SUMMARY\n\n" + state.Content})
-	}
-	result = append(result, recent...)
-	return result, metrics, nil
+	return a.manager.Name()
 }
+func (a *Agent) ContextStrategy() domain.ContextStrategyName { return a.managerName() }
 
 func (a *Agent) History(ctx context.Context) ([]domain.ChatMessage, error) {
 	if a.history == nil {

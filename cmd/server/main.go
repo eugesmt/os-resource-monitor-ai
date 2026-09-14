@@ -17,6 +17,7 @@ import (
 
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
+	"taskmanager-ai/internal/domain"
 	"taskmanager-ai/internal/server"
 	"taskmanager-ai/internal/storage"
 
@@ -38,6 +39,7 @@ type Config struct {
 	ChatDBPath               string
 	AIMetrics                ai.UsageConfig
 	AIRecentMessagesLimit    int
+	AIContextStrategy        domain.ContextStrategyName
 	AISummarizationBatchSize int
 	AIMaxSummaryTokens       int
 	AISummarizationModel     string
@@ -54,7 +56,11 @@ func loadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	recent, err := positiveEvenEnv("AI_RECENT_MESSAGES_LIMIT", 20)
+	recent, err := contextRecentLimit()
+	if err != nil {
+		return Config{}, err
+	}
+	strategy, err := contextStrategy()
 	if err != nil {
 		return Config{}, err
 	}
@@ -73,7 +79,7 @@ func loadConfig() (Config, error) {
 		HistorySize:           envInt("HISTORY_SIZE", 300),
 		MaxProcesses:          envInt("MAX_PROCESSES", 100),
 		AIModel:               mainModel,
-		AIRecentMessagesLimit: recent, AISummarizationBatchSize: batch, AIMaxSummaryTokens: maxSummary,
+		AIRecentMessagesLimit: recent, AIContextStrategy: strategy, AISummarizationBatchSize: batch, AIMaxSummaryTokens: maxSummary,
 		AISummarizationModel: envOrDefault("AI_SUMMARIZATION_MODEL", mainModel),
 		AIBaseURL:            envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 		AIAPIKey:             strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
@@ -81,6 +87,33 @@ func loadConfig() (Config, error) {
 		ChatDBPath:           envOrDefault("CHAT_DB_PATH", "taskmanager.db"),
 		AIMetrics:            metrics,
 	}, nil
+}
+
+func contextRecentLimit() (int, error) {
+	modern := strings.TrimSpace(os.Getenv("AI_CONTEXT_RECENT_MESSAGES_LIMIT"))
+	legacy := strings.TrimSpace(os.Getenv("AI_RECENT_MESSAGES_LIMIT"))
+	if modern != "" && legacy != "" && modern != legacy {
+		return 0, fmt.Errorf("AI_CONTEXT_RECENT_MESSAGES_LIMIT and AI_RECENT_MESSAGES_LIMIT differ")
+	}
+	key := "AI_CONTEXT_RECENT_MESSAGES_LIMIT"
+	if modern == "" {
+		key = "AI_RECENT_MESSAGES_LIMIT"
+	}
+	return positiveEvenEnv(key, 20)
+}
+
+func contextStrategy() (domain.ContextStrategyName, error) {
+	raw := strings.TrimSpace(os.Getenv("AI_CONTEXT_STRATEGY"))
+	if raw == "" {
+		return domain.ContextStrategySlidingWindow, nil
+	}
+	name := domain.ContextStrategyName(raw)
+	switch name {
+	case domain.ContextStrategySlidingWindow, domain.ContextStrategyStickyFacts, domain.ContextStrategyBranching:
+		return name, nil
+	default:
+		return "", fmt.Errorf("AI_CONTEXT_STRATEGY must be sliding_window, sticky_facts, or branching")
+	}
 }
 
 func positiveEnv(key string, fallback int) (int, error) {
@@ -178,7 +211,9 @@ func main() {
 	defer chatHistory.Close()
 	state.SetAIHistory(chatHistory)
 	if cfg.AIAPIKey != "" {
-		state.SetAIAgent(ai.NewConfiguredAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel, ai.WithLogger(logger), ai.WithUsageConfig(cfg.AIMetrics)), cfg.AIPrompt, chatHistory, cfg.AIRecentMessagesLimit, cfg.AISummarizationBatchSize, cfg.AIMaxSummaryTokens, cfg.AISummarizationModel))
+		client := ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel, ai.WithLogger(logger), ai.WithUsageConfig(cfg.AIMetrics))
+		manager := newContextManager(cfg.AIContextStrategy, chatHistory, cfg.AIRecentMessagesLimit, client)
+		state.SetAIAgent(ai.NewAgentWithContextManager(client, cfg.AIPrompt, chatHistory, manager))
 	}
 	state.Start(ctx, cfg.CollectorInterval)
 	defer state.Stop()
@@ -204,6 +239,17 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("server shutdown failed", "error", err)
+	}
+}
+
+func newContextManager(name domain.ContextStrategyName, store *storage.ChatHistory, limit int, client *ai.Client) ai.ContextManager {
+	switch name {
+	case domain.ContextStrategyStickyFacts:
+		return ai.NewStickyFacts(store, store.ListFacts, limit).WithExtractor(ai.NewFactExtractor(client, envOrDefault("AI_FACT_MODEL", ""), envInt("AI_FACT_MAX_ITEMS", 32)))
+	case domain.ContextStrategyBranching:
+		return ai.NewBranching(store)
+	default:
+		return ai.NewSlidingWindow(store, limit)
 	}
 }
 

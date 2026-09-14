@@ -96,7 +96,7 @@ func (s *State) GetHistory(limit int) []collector.SystemSnapshot {
 	}
 	return s.buffer.GetLast(limit)
 }
-func (s *State) AskAI(ctx context.Context, question string) (*domain.AnalysisResponse, domain.AICallUsage, error) {
+func (s *State) AskAI(ctx context.Context, question string, branchID ...int64) (*domain.AnalysisResponse, domain.AICallUsage, error) {
 	s.mu.RLock()
 	agent := s.aiAgent
 	snapshot := cloneSnapshot(s.snapshot)
@@ -121,21 +121,67 @@ func (s *State) AskAI(ctx context.Context, question string) (*domain.AnalysisRes
 	}
 	contextText := ai.BuildContext(snapshot, snapshotHistory)
 
+	if len(branchID) > 0 && branchID[0] != 0 {
+		return agent.AskOnBranch(ctx, question, contextText, branchID[0])
+	}
 	return agent.Ask(ctx, question, contextText)
 }
 
-func (s *State) GetAIHistory(ctx context.Context) ([]domain.ChatMessage, error) {
+func (s *State) GetAIHistory(ctx context.Context, branchID ...int64) ([]domain.ChatMessage, error) {
 	s.mu.RLock()
 	agent := s.aiAgent
 	history := s.aiHistory
 	s.mu.RUnlock()
 	if history != nil {
+		if len(branchID) > 0 {
+			if scoped, ok := history.(interface {
+				ResolveScope(context.Context, int64) (domain.ContextScope, error)
+				LoadLineage(context.Context, domain.ContextScope) ([]domain.ChatMessage, error)
+			}); ok {
+				scope, err := scoped.ResolveScope(ctx, branchID[0])
+				if err != nil {
+					return nil, err
+				}
+				return scoped.LoadLineage(ctx, scope)
+			}
+		}
 		return history.Load(ctx)
 	}
 	if agent == nil {
 		return nil, ErrAIUnavailable
 	}
 	return agent.History(ctx)
+}
+
+func (s *State) ContextInfo(ctx context.Context) (map[string]any, error) {
+	s.mu.RLock()
+	agent := s.aiAgent
+	history := s.aiHistory
+	s.mu.RUnlock()
+	if agent == nil {
+		return nil, ErrAIUnavailable
+	}
+	out := map[string]any{"context_strategy": agent.ContextStrategy()}
+	if scoped, ok := history.(interface {
+		GetActiveScope(context.Context) (domain.ContextScope, error)
+	}); ok {
+		scope, err := scoped.GetActiveScope(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out["scope"] = scope
+	}
+	return out, nil
+}
+
+func (s *State) BranchStore() interface{} { s.mu.RLock(); defer s.mu.RUnlock(); return s.aiHistory }
+func (s *State) ContextStrategy() domain.ContextStrategyName {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.aiAgent == nil {
+		return ""
+	}
+	return s.aiAgent.ContextStrategy()
 }
 
 func (s *State) Subscribe() (<-chan collector.SystemSnapshot, func()) {

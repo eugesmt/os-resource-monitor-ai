@@ -67,6 +67,13 @@ func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []d
 	return c.complete(ctx, systemPrompt, messages, c.model, 2000, true)
 }
 
+func (c *Client) CompleteAuxiliary(ctx context.Context, systemPrompt string, messages []domain.ChatMessage, model string, maxTokens int) (CompletionResult, error) {
+	if model == "" {
+		model = c.model
+	}
+	return c.complete(ctx, systemPrompt, messages, model, maxTokens, true)
+}
+
 func (c *Client) complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage, model string, maxTokens int, jsonResponse bool) (CompletionResult, error) {
 	usage := estimatePrompt(systemPrompt, messages)
 	usage.Model = model
