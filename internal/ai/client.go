@@ -64,17 +64,17 @@ func NewClient(apiKey, baseURL, model string, options ...ClientOption) *Client {
 }
 
 func (c *Client) Complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage) (CompletionResult, error) {
-	return c.complete(ctx, systemPrompt, messages, c.model, 2000, true)
+	return c.complete(ctx, systemPrompt, messages, c.model, 2000, "main", true)
 }
 
 func (c *Client) CompleteAuxiliary(ctx context.Context, systemPrompt string, messages []domain.ChatMessage, model string, maxTokens int) (CompletionResult, error) {
 	if model == "" {
 		model = c.model
 	}
-	return c.complete(ctx, systemPrompt, messages, model, maxTokens, true)
+	return c.complete(ctx, systemPrompt, messages, model, maxTokens, "auxiliary", false)
 }
 
-func (c *Client) complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage, model string, maxTokens int, jsonResponse bool) (CompletionResult, error) {
+func (c *Client) complete(ctx context.Context, systemPrompt string, messages []domain.ChatMessage, model string, maxTokens int, callKind string, jsonResponse bool) (CompletionResult, error) {
 	usage := estimatePrompt(systemPrompt, messages)
 	usage.Model = model
 	for _, message := range messages {
@@ -110,12 +110,7 @@ func (c *Client) complete(ctx context.Context, systemPrompt string, messages []d
 	defer func() {
 		attrs := []any{
 			"call_id", callID,
-			"call_kind", func() string {
-				if jsonResponse {
-					return "main"
-				}
-				return "summarizer"
-			}(),
+			"call_kind", callKind,
 			"model", model,
 			"outcome", outcome,
 			"duration", time.Since(started),

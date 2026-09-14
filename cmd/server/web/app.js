@@ -4,6 +4,8 @@ let aiBusy = false;
 let events = null;
 let activeBranch = 0;
 let activeStrategy = '';
+let lastCheckpointID = 0;
+const checkpointMessageIDs = new Map();
 
 const COLORS = { grid: '#24303c', label: '#738095', cpu: '#79a9ec', mem: '#8fd1b0' };
 
@@ -82,6 +84,7 @@ async function loadInitialState() {
   }
   await loadBranches();
   await loadFacts();
+  await loadCheckpoints();
   const [snapshotResp, historyResp, chatHistoryResp] = await Promise.all([
     fetch('/api/snapshot', { cache: 'no-store' }),
     fetch('/api/history?limit=120', { cache: 'no-store' }),
@@ -102,6 +105,18 @@ async function loadInitialState() {
         try { addMessage('ai', formatAIAnswer(JSON.parse(item.content)), item.usage, item.id); } catch { /* ignore malformed legacy rows */ }
       }
     }
+  }
+}
+
+async function loadCheckpoints() {
+  checkpointMessageIDs.clear();
+  if (activeStrategy !== 'branching' || !activeBranch) return;
+  const response = await fetch(`/api/ai/checkpoints?branch_id=${activeBranch}`, { cache: 'no-store' });
+  if (!response.ok) return;
+  const payload = await response.json();
+  for (const checkpoint of (payload.items || [])) {
+    checkpointMessageIDs.set(Number(checkpoint.message_id), Number(checkpoint.id));
+    lastCheckpointID = Number(checkpoint.id);
   }
 }
 
@@ -135,7 +150,19 @@ async function loadBranches() {
   select.replaceChildren();
   for (const branch of (payload.items || [])) { const option = document.createElement('option'); option.value = branch.id; option.textContent = branch.name || `Ветка ${branch.id}`; option.selected = Number(branch.id) === activeBranch; select.appendChild(option); }
   select.onchange = async () => { const id = Number(select.value); const version = Number(payload.version || 1); const r = await fetch('/api/ai/branches/active', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({branch_id:id,expected_version:version}) }); if (r.ok) { activeBranch=id; window.location.reload(); } };
-  $('newBranchBtn').onclick = async () => { const checkpointID = Number(window.prompt('ID checkpoint для новой ветки:')); if (!checkpointID) return; const name = window.prompt('Название ветки:', 'Эксперимент') || 'Эксперимент'; const r = await fetch('/api/ai/branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({checkpoint_id:checkpointID,name,activate:true}) }); if (r.ok) window.location.reload(); };
+  $('newBranchBtn').onclick = async () => {
+    if (!lastCheckpointID) {
+      addDiagnostic('Сначала создайте checkpoint на assistant-сообщении', 'error');
+      return;
+    }
+    const checkpointID = lastCheckpointID;
+    const name = window.prompt('Название ветки:', 'Эксперимент') || 'Эксперимент';
+    const r = await fetch('/api/ai/branches', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({checkpoint_id:checkpointID,name,activate:true}) });
+    if (r.ok) { window.location.reload(); return; }
+    let payload = {};
+    try { payload = await r.json(); } catch { /* ignore malformed error */ }
+    addDiagnostic(payload.error || 'Не удалось создать ветку', 'error');
+  };
 }
 
 function usageValue(value) { return value == null ? '—' : String(value); }
@@ -230,8 +257,23 @@ function addMessage(role, text, usage, messageID) {
   node.appendChild(content);
   if (role === 'ai') { addUsageMetadata(node, usage); renderContextMetrics(usage); }
   if (role === 'ai' && activeStrategy === 'branching' && messageID) {
-    const checkpoint = document.createElement('button'); checkpoint.type = 'button'; checkpoint.className = 'checkpoint-button'; checkpoint.textContent = 'Создать checkpoint';
-    checkpoint.onclick = async () => { const label = window.prompt('Метка checkpoint:', 'Точка продолжения') || ''; const response = await fetch('/api/ai/checkpoints', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({branch_id:activeBranch,message_id:messageID,label}) }); if (response.ok) { checkpoint.textContent='Checkpoint создан'; checkpoint.disabled=true; } };
+    const existingCheckpointID = checkpointMessageIDs.get(Number(messageID));
+    const checkpoint = document.createElement('button'); checkpoint.type = 'button'; checkpoint.className = 'checkpoint-button'; checkpoint.textContent = existingCheckpointID ? `Checkpoint создан (#${existingCheckpointID})` : 'Создать checkpoint'; checkpoint.disabled = Boolean(existingCheckpointID);
+    checkpoint.onclick = async () => {
+      const label = window.prompt('Метка checkpoint:', 'Точка продолжения') || '';
+      const response = await fetch('/api/ai/checkpoints', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({branch_id:activeBranch,message_id:messageID,label}) });
+      if (response.ok) {
+        const payload = await response.json();
+        lastCheckpointID = Number(payload.id || 0);
+        checkpointMessageIDs.set(Number(messageID), lastCheckpointID);
+        checkpoint.textContent = lastCheckpointID ? `Checkpoint создан (#${lastCheckpointID})` : 'Checkpoint создан';
+        checkpoint.disabled = true;
+        return;
+      }
+      let payload = {};
+      try { payload = await response.json(); } catch { /* ignore malformed error */ }
+      addDiagnostic(payload.error || 'Не удалось создать checkpoint', 'error');
+    };
     node.appendChild(checkpoint);
   }
   $('chat').appendChild(node);
@@ -391,7 +433,7 @@ $('askForm').addEventListener('submit', async (event) => {
       }
       throw new Error(payload.error || 'AI request failed');
     }
-    addMessage('ai', formatAIAnswer(payload.answer), payload.usage);
+    addMessage('ai', formatAIAnswer(payload.answer), payload.usage, payload.assistant_message_id);
     $('contextStrategy').textContent = `Стратегия: ${strategyLabel(payload.context_strategy || activeStrategy)}`;
     if (payload.branch_id) { activeBranch = Number(payload.branch_id); $('contextBranch').textContent = `Ветка: ${activeBranch}`; }
     renderContextMetrics(payload.usage);

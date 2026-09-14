@@ -26,6 +26,7 @@ type State struct {
 	hasSnapshot bool
 	aiAgent     *ai.Agent
 	aiHistory   ai.HistoryStore
+	aiAskMu     sync.Mutex
 
 	subscriberMu sync.Mutex
 	subscribers  map[chan collector.SystemSnapshot]struct{}
@@ -125,6 +126,28 @@ func (s *State) AskAI(ctx context.Context, question string, branchID ...int64) (
 		return agent.AskOnBranch(ctx, question, contextText, branchID[0])
 	}
 	return agent.Ask(ctx, question, contextText)
+}
+
+// AskAIWithMessageID returns the persisted assistant message ID for UI actions
+// that must target the just-completed turn, such as creating a checkpoint.
+func (s *State) AskAIWithMessageID(ctx context.Context, question string, branchID ...int64) (*domain.AnalysisResponse, domain.AICallUsage, int64, error) {
+	s.aiAskMu.Lock()
+	defer s.aiAskMu.Unlock()
+
+	answer, usage, err := s.AskAI(ctx, question, branchID...)
+	if err != nil {
+		return nil, usage, 0, err
+	}
+	items, err := s.GetAIHistory(ctx, usage.BranchID)
+	if err != nil {
+		return answer, usage, 0, err
+	}
+	for i := len(items) - 1; i >= 0; i-- {
+		if items[i].Role == domain.ChatRoleAssistant {
+			return answer, usage, items[i].ID, nil
+		}
+	}
+	return answer, usage, 0, nil
 }
 
 func (s *State) GetAIHistory(ctx context.Context, branchID ...int64) ([]domain.ChatMessage, error) {

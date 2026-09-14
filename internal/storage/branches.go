@@ -53,8 +53,8 @@ func (s *ChatHistory) LoadLineage(ctx context.Context, scope domain.ContextScope
 			return nil, errors.New("branch lineage cycle")
 		}
 		seen[parent] = true
-		segments[len(segments)-1].cutoff = message
 		segments = append(segments, segment{branch: parent})
+		segments[len(segments)-1].cutoff = message
 		if len(segments) > 64 {
 			return nil, errors.New("branch lineage exceeds maximum depth")
 		}
@@ -132,12 +132,32 @@ func (s *ChatHistory) CreateCheckpoint(ctx context.Context, conversationID, bran
 		return domain.DialogueCheckpoint{}, errors.New("checkpoint must reference assistant message")
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := s.db.ExecContext(ctx, `INSERT INTO dialogue_checkpoints(conversation_id,branch_id,message_id,label,created_at) VALUES(?,?,?,?,?)`, conversationID, branchID, messageID, label, now)
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO dialogue_checkpoints(conversation_id,branch_id,message_id,label,created_at) VALUES(?,?,?,?,?)`, conversationID, branchID, messageID, label, now)
 	if err != nil {
 		return domain.DialogueCheckpoint{}, err
 	}
-	id, _ := res.LastInsertId()
-	return domain.DialogueCheckpoint{ID: id, ConversationID: conversationID, BranchID: branchID, MessageID: messageID, Label: label, CreatedAt: now}, nil
+	var checkpoint domain.DialogueCheckpoint
+	if err := s.db.QueryRowContext(ctx, `SELECT id,conversation_id,branch_id,message_id,label,created_at FROM dialogue_checkpoints WHERE branch_id=? AND message_id=?`, branchID, messageID).Scan(&checkpoint.ID, &checkpoint.ConversationID, &checkpoint.BranchID, &checkpoint.MessageID, &checkpoint.Label, &checkpoint.CreatedAt); err != nil {
+		return domain.DialogueCheckpoint{}, err
+	}
+	return checkpoint, nil
+}
+
+func (s *ChatHistory) ListCheckpoints(ctx context.Context, conversationID, branchID int64) ([]domain.DialogueCheckpoint, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,conversation_id,branch_id,message_id,label,created_at FROM dialogue_checkpoints WHERE conversation_id=? AND branch_id=? ORDER BY id`, conversationID, branchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var checkpoints []domain.DialogueCheckpoint
+	for rows.Next() {
+		var checkpoint domain.DialogueCheckpoint
+		if err := rows.Scan(&checkpoint.ID, &checkpoint.ConversationID, &checkpoint.BranchID, &checkpoint.MessageID, &checkpoint.Label, &checkpoint.CreatedAt); err != nil {
+			return nil, err
+		}
+		checkpoints = append(checkpoints, checkpoint)
+	}
+	return checkpoints, rows.Err()
 }
 
 func (s *ChatHistory) CreateBranch(ctx context.Context, conversationID, checkpointID int64, name string, activate bool) (domain.DialogueBranch, error) {

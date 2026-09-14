@@ -50,6 +50,33 @@ func TestClientCompleteSendsModelAndMessages(t *testing.T) {
 	}
 }
 
+func TestClientCompleteAuxiliaryAllowsJSONArrayAndLogsAuxiliary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if _, ok := request["response_format"]; ok {
+			t.Fatalf("auxiliary request unexpectedly contains response_format: %#v", request["response_format"])
+		}
+		_, _ = w.Write([]byte(`{"id":"auxiliary-1","choices":[{"message":{"content":"[]"}}],"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}`))
+	}))
+	defer server.Close()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	result, err := NewClient("key", server.URL, "model", WithLogger(logger)).CompleteAuxiliary(context.Background(), "extract", []domain.ChatMessage{{Role: "user", Content: "question"}}, "model", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "[]" {
+		t.Fatalf("content = %q, want []", result.Content)
+	}
+	if !strings.Contains(logs.String(), `"call_kind":"auxiliary"`) {
+		t.Fatalf("logs = %s", logs.String())
+	}
+}
+
 func TestClientCompleteLogsStructuredUsageWithoutPrompt(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"response-1","choices":[{"message":{"content":"safe answer"}}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`))
