@@ -40,3 +40,16 @@ func TestRingBufferConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestRingBufferGetLastDoesNotAliasSnapshotSlices(t *testing.T) {
+	r := NewRingBuffer(1)
+	r.Add(collector.SystemSnapshot{CPUPerCore: []float64{10}, GPU: []collector.GPUInfo{{Name: "gpu"}}, MissingData: []string{"gpu"}})
+	got := r.GetLast(1)
+	got[0].CPUPerCore[0] = 99
+	got[0].GPU[0].Name = "changed"
+	got[0].MissingData[0] = "changed"
+	want := r.GetLast(1)[0]
+	if want.CPUPerCore[0] != 10 || want.GPU[0].Name != "gpu" || want.MissingData[0] != "gpu" {
+		t.Fatalf("ring buffer snapshot aliases internal slices: %#v", want)
+	}
+}

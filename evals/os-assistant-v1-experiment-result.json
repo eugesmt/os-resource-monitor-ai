@@ -1,0 +1,25 @@
+{
+  "manifest": {
+    "manifest_version": "os-assistant-v1.experiment.v1",
+    "eval_set_version": "os-assistant-v1.eval.v1",
+    "grader_version": "os-assistant-v1.grader.v2",
+    "model_version": "offline-fixture",
+    "config_version": "deepseek-generation.v2",
+    "schema_version": "diagnosis.v1",
+    "baseline_prompt_version": "os-assistant.prompt.v1",
+    "candidate_prompt_version": "os-assistant.prompt.v1-candidate",
+    "changed_variable": "prompt_version",
+    "trials": 2,
+    "latency_applicable": false
+  },
+  "baseline_trials": [
+    {"cases":10,"passed":9,"status_correct":9,"expected_observations":7,"observed_observations":6,"grounded_observations":6,"forbidden_claims":0,"unsupported_claims":0,"missing_data_expected":3,"missing_data_matched":3,"missing_data_false_positives":0,"missing_data_false_negatives":0,"error_cases":2,"correct_errors":1,"pass_rate":0.9,"status_accuracy":0.9,"observation_recall":0.8571428571428571,"missing_data_precision":1,"missing_data_recall":1,"false_positive_rate":0,"error_accuracy":0.5},
+    {"cases":10,"passed":10,"status_correct":10,"expected_observations":7,"observed_observations":7,"grounded_observations":7,"forbidden_claims":0,"unsupported_claims":0,"missing_data_expected":3,"missing_data_matched":3,"missing_data_false_positives":0,"missing_data_false_negatives":0,"error_cases":1,"correct_errors":1,"pass_rate":1,"status_accuracy":1,"observation_recall":1,"missing_data_precision":1,"missing_data_recall":1,"false_positive_rate":0,"error_accuracy":1}
+  ],
+  "candidate_trials": [
+    {"cases":10,"passed":10,"status_correct":10,"expected_observations":7,"observed_observations":7,"grounded_observations":7,"forbidden_claims":0,"unsupported_claims":0,"missing_data_expected":3,"missing_data_matched":3,"missing_data_false_positives":0,"missing_data_false_negatives":0,"error_cases":1,"correct_errors":1,"pass_rate":1,"status_accuracy":1,"observation_recall":1,"missing_data_precision":1,"missing_data_recall":1,"false_positive_rate":0,"error_accuracy":1},
+    {"cases":10,"passed":10,"status_correct":10,"expected_observations":7,"observed_observations":7,"grounded_observations":7,"forbidden_claims":0,"unsupported_claims":0,"missing_data_expected":3,"missing_data_matched":3,"missing_data_false_positives":0,"missing_data_false_negatives":0,"error_cases":1,"correct_errors":1,"pass_rate":1,"status_accuracy":1,"observation_recall":1,"missing_data_precision":1,"missing_data_recall":1,"false_positive_rate":0,"error_accuracy":1}
+  ],
+  "candidate_minus_baseline": {"pass_rate":0.050000000000000044,"status_accuracy":0.050000000000000044,"observation_recall":0.0714285714285714,"false_positive_rate":0},
+  "candidate_variance": {"pass_rate":0,"status_accuracy":0,"observation_recall":0,"false_positive_rate":0}
+}

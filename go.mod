@@ -3,6 +3,7 @@ module taskmanager-ai
 go 1.27.1
 
 require (
+	github.com/NVIDIA/go-nvml v0.13.4-0
 	github.com/joho/godotenv v1.5.1
 	github.com/sashabaranov/go-openai v1.42.0
 	github.com/shirou/gopsutil/v3 v3.24.5

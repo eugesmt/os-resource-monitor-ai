@@ -4,21 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestClientCompleteSendsModelAndMessages(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
 		if request["model"] != "test-model" {
 			t.Errorf("model = %v", request["model"])
+		}
+		if request["max_tokens"] != float64(DefaultMaxTokens) {
+			t.Errorf("max_tokens = %v", request["max_tokens"])
+		}
+		format, _ := request["response_format"].(map[string]any)
+		if format["type"] != "json_object" {
+			t.Errorf("response_format = %v", format)
 		}
 		messages, ok := request["messages"].([]any)
 		if !ok || len(messages) != 2 {
@@ -30,7 +37,7 @@ func TestClientCompleteSendsModelAndMessages(t *testing.T) {
 			second["role"] != "user" || second["content"] != "content" {
 			t.Fatalf("messages = %v", messages)
 		}
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"  answer  "}}]}`))
+		_, _ = w.Write([]byte(`{"id":"resp-1","model":"test-model","usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5},"choices":[{"finish_reason":"stop","message":{"content":"  answer  "}}]}`))
 	}))
 	defer server.Close()
 
@@ -38,49 +45,107 @@ func TestClientCompleteSendsModelAndMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
-	if answer != "answer" {
-		t.Fatalf("answer = %q, want answer", answer)
+	if answer.Content != "answer" || answer.FinishReason != "stop" || !answer.Usage.Available || answer.Usage.TotalTokens != 5 || answer.Latency <= 0 {
+		t.Fatalf("answer = %#v, want stopped answer", answer)
 	}
 }
 
 func TestClientCompleteEmptyChoices(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"choices":[]}`))
 	}))
 	defer server.Close()
-	_, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", "content")
+	result, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", "content")
 	if err == nil || !strings.Contains(err.Error(), "empty response") {
 		t.Fatalf("error = %v", err)
+	}
+	if result.Model != "model" || result.ConfigVersion == "" || result.Latency <= 0 || result.Usage.Available {
+		t.Fatalf("empty response metadata = %#v", result)
+	}
+}
+
+func TestClientCompleteRejectsAbnormalFinishReasons(t *testing.T) {
+	for _, reason := range []string{"length", "content_filter", "tool_calls", "aborted"} {
+		t.Run(reason, func(t *testing.T) {
+			server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"` + reason + `","message":{"content":"{}"}}]}`))
+			}))
+			defer server.Close()
+			_, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", "content")
+			if err == nil {
+				t.Fatal("Complete() error = nil")
+			}
+			if reason == "length" && !errors.Is(err, ErrTruncated) {
+				t.Fatalf("error = %v", err)
+			}
+			if reason == "content_filter" && !errors.Is(err, ErrContentFiltered) {
+				t.Fatalf("error = %v", err)
+			}
+			if reason == "tool_calls" && !errors.Is(err, ErrToolCalls) {
+				t.Fatalf("error = %v", err)
+			}
+			if reason == "aborted" && !errors.Is(err, ErrAbnormalFinish) {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 
 func TestClientCompleteUpstreamError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"bad upstream"}}`, http.StatusBadGateway)
 	}))
 	defer server.Close()
-	_, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", "content")
+	result, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", "content")
 	if err == nil || !strings.Contains(err.Error(), "AI request failed") {
 		t.Fatalf("error = %v", err)
+	}
+	if result.Model != "model" || result.ConfigVersion == "" || result.Latency <= 0 || result.Usage.Available {
+		t.Fatalf("upstream error metadata = %#v", result)
 	}
 }
 
 func TestClientCompleteCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := NewClient("key", "http://127.0.0.1:1", "model").Complete(ctx, "system", "content")
+	result, err := NewClient("key", "http://127.0.0.1:1", "model").Complete(ctx, "system", "content")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if result.Model != "model" || result.ConfigVersion == "" || result.Latency <= 0 || result.Usage.Available {
+		t.Fatalf("cancelled metadata = %#v", result)
 	}
 }
 
 func TestClientCompleteDeadlineContext(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { time.Sleep(100 * time.Millisecond) }))
+	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { time.Sleep(100 * time.Millisecond) }))
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err := NewClient("key", server.URL, "model").Complete(ctx, "system", "content")
+	result, err := NewClient("key", server.URL, "model").Complete(ctx, "system", "content")
 	if err == nil || !errors.Is(err, ErrTimeout) {
 		t.Fatalf("error = %v", err)
 	}
+	if result.Model != "model" || result.ConfigVersion == "" || result.Latency <= 0 || result.Usage.Available {
+		t.Fatalf("timeout metadata = %#v", result)
+	}
+}
+
+type testServer struct {
+	server   *http.Server
+	URL      string
+	listener net.Listener
+}
+
+func (s *testServer) Close() { _ = s.server.Close() }
+
+func newTestServer(t *testing.T, handler http.Handler) *testServer {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := &http.Server{Handler: handler}
+	go func() { _ = server.Serve(listener) }()
+	return &testServer{server: server, URL: "http://" + listener.Addr().String(), listener: listener}
 }

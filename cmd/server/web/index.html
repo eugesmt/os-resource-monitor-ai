@@ -39,10 +39,44 @@
         <div id="diskWrite" class="metric-sub">↑ —</div>
       </article>
       <article class="card metric-card">
+        <div class="metric-label">GPU</div>
+        <div id="gpu" class="metric-value">—</div>
+        <div id="gpuSub" class="metric-sub">Ожидание данных</div>
+      </article>
+      <article class="card metric-card">
         <div class="metric-label">История</div>
         <div id="historyCount" class="metric-value">0</div>
         <div class="metric-sub">снимков в памяти</div>
       </article>
+    </section>
+
+    <section class="card panel gpu-dashboard">
+      <div class="panel-head">
+        <div>
+          <h2>GPU dashboard</h2>
+          <div class="panel-hint">NVIDIA NVML · текущие показатели и история</div>
+        </div>
+      </div>
+      <div class="gpu-dashboard-history">История последних snapshot</div>
+      <div class="gpu-charts">
+        <article class="gpu-chart-card">
+          <div class="gpu-chart-title">Загрузка GPU</div>
+          <div class="gpu-chart-wrap"><svg id="gpuUtilChart" class="gpu-chart" role="img" aria-label="История загрузки GPU"></svg><div id="gpuUtilEmpty" class="chart-empty">Нет данных</div></div>
+        </article>
+        <article class="gpu-chart-card">
+          <div class="gpu-chart-title">Видеопамять</div>
+          <div class="gpu-chart-wrap"><svg id="gpuMemoryChart" class="gpu-chart" role="img" aria-label="История использования видеопамяти"></svg><div id="gpuMemoryEmpty" class="chart-empty">Нет данных</div></div>
+        </article>
+        <article class="gpu-chart-card">
+          <div class="gpu-chart-title">Температура</div>
+          <div class="gpu-chart-wrap"><svg id="gpuTemperatureChart" class="gpu-chart" role="img" aria-label="История температуры GPU"></svg><div id="gpuTemperatureEmpty" class="chart-empty">Нет данных</div></div>
+        </article>
+      </div>
+      <div class="subpanel-head">
+        <h3>CPU по ядрам</h3>
+        <div class="panel-hint">Текущая загрузка логических ядер</div>
+      </div>
+      <div id="cpuCores" class="cpu-cores"><div class="table-empty">Ожидание данных…</div></div>
     </section>
 
     <section class="card panel chart-panel">

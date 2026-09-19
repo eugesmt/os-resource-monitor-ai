@@ -31,7 +31,7 @@ type historyResponse struct {
 	Items []collector.SystemSnapshot `json:"items"`
 }
 
-func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
+func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
@@ -108,7 +108,7 @@ func RegisterRoutes(mux *http.ServeMux, state *State, webFS fs.FS) {
 	mux.Handle("/", spaHandler(webFS))
 }
 
-func serveEvents(w http.ResponseWriter, r *http.Request, state *State) {
+func serveEvents(w http.ResponseWriter, r *http.Request, state *Runtime) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeAPIError(w, 500, errors.New("streaming unsupported"))

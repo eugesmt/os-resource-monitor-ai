@@ -15,6 +15,102 @@ function fmtBytes(value) {
 
 function fmtRate(value) { return `${fmtBytes(value)}/s`; }
 
+function gpuMemoryPercent(gpu) {
+  const total = Number(gpu?.memory_total) || 0;
+  const used = Number(gpu?.memory_used) || 0;
+  return total > 0 ? (used / total) * 100 : 0;
+}
+
+function renderGPUs(gpus, missingData) {
+  const list = $('gpuList');
+  if (list) list.replaceChildren();
+  if (!Array.isArray(gpus) || gpus.length === 0) {
+    if (list) {
+      const empty = document.createElement('div');
+      empty.className = 'table-empty';
+      empty.textContent = Array.isArray(missingData) && missingData.includes('gpu')
+        ? 'NVIDIA GPU или NVML недоступны'
+        : 'Нет данных о GPU';
+      list.appendChild(empty);
+    }
+    $('gpu').textContent = '—';
+    $('gpuSub').textContent = 'Данные недоступны';
+    return;
+  }
+
+  const maxUtilization = Math.max(...gpus.map((gpu) => Number(gpu.utilization_percent) || 0));
+  const maxTemperature = Math.max(...gpus.map((gpu) => Number(gpu.temperature_celsius) || 0));
+  const totalMemory = gpus.reduce((sum, gpu) => sum + (Number(gpu.memory_total) || 0), 0);
+  const usedMemory = gpus.reduce((sum, gpu) => sum + (Number(gpu.memory_used) || 0), 0);
+  $('gpu').textContent = gpus.length === 1 ? String(gpus[0].name || 'NVIDIA GPU') : `${gpus.length} GPU`;
+  $('gpuSub').textContent = `${maxUtilization.toFixed(0)}% · VRAM ${(totalMemory ? usedMemory / totalMemory * 100 : 0).toFixed(1)}% · ${maxTemperature.toFixed(0)} °C`;
+
+  for (const gpu of gpus) {
+    const row = document.createElement('div');
+    row.className = 'gpu-row';
+    const name = document.createElement('div');
+    name.className = 'gpu-name';
+    name.textContent = String(gpu.name || `GPU ${gpu.index ?? ''}`);
+    const stats = document.createElement('div');
+    stats.className = 'gpu-stats';
+    stats.textContent = `GPU ${Number(gpu.utilization_percent || 0).toFixed(0)}% · VRAM ${gpuMemoryPercent(gpu).toFixed(1)}% (${fmtBytes(gpu.memory_used)} / ${fmtBytes(gpu.memory_total)}) · ${Number(gpu.temperature_celsius || 0).toFixed(0)} °C`;
+    row.append(name, stats);
+    if (list) list.appendChild(row);
+  }
+}
+
+function gpuSnapshotStats(snapshot) {
+  const gpus = Array.isArray(snapshot?.gpu) ? snapshot.gpu : [];
+  if (gpus.length === 0) return null;
+  const totalMemory = gpus.reduce((sum, gpu) => sum + (Number(gpu.memory_total) || 0), 0);
+  const usedMemory = gpus.reduce((sum, gpu) => sum + (Number(gpu.memory_used) || 0), 0);
+  return {
+    time: snapshot.timestamp || snapshot.captured_at,
+    utilization: Math.max(...gpus.map((gpu) => Number(gpu.utilization_percent) || 0)),
+    memory: totalMemory > 0 ? usedMemory / totalMemory * 100 : 0,
+    temperature: Math.max(...gpus.map((gpu) => Number(gpu.temperature_celsius) || 0)),
+  };
+}
+
+function drawGPUChart(svgId, emptyId, points, color, maxValue, unit) {
+  const svg = $(svgId);
+  const empty = $(emptyId);
+  const width = Math.max(260, svg.clientWidth || svg.parentElement.clientWidth || 360);
+  const height = 180;
+  const pad = { left: 38, right: 10, top: 12, bottom: 22 };
+  const plotW = Math.max(1, width - pad.left - pad.right);
+  const plotH = Math.max(1, height - pad.top - pad.bottom);
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.replaceChildren();
+  if (points.length === 0) {
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+  const xFor = (i) => pad.left + (points.length === 1 ? plotW / 2 : i / (points.length - 1) * plotW);
+  const yFor = (value) => pad.top + plotH - Math.max(0, Math.min(maxValue, value)) / maxValue * plotH;
+  for (const value of [0, maxValue / 2, maxValue]) {
+    const y = yFor(value);
+    svg.appendChild(svgEl('line', { x1: pad.left, y1: y, x2: pad.left + plotW, y2: y, stroke: COLORS.grid, 'stroke-width': 1 }));
+    const label = svgEl('text', { x: 4, y: y + 4, fill: COLORS.label, 'font-size': 10, 'font-family': 'system-ui' });
+    label.textContent = `${value.toFixed(0)}${unit}`;
+    svg.appendChild(label);
+  }
+  const coordinates = points.map((point, index) => `${xFor(index)},${yFor(point.value)}`).join(' ');
+  if (points.length === 1) {
+    svg.appendChild(svgEl('circle', { cx: xFor(0), cy: yFor(points[0].value), r: 3.5, fill: color }));
+  } else {
+    svg.appendChild(svgEl('polyline', { points: coordinates, fill: 'none', stroke: color, 'stroke-width': 2.2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+  }
+}
+
+function drawGPUCharts(items) {
+  const stats = (Array.isArray(items) ? items : []).map(gpuSnapshotStats).filter(Boolean);
+  drawGPUChart('gpuUtilChart', 'gpuUtilEmpty', stats.map((point) => ({ value: point.utilization })), '#c994f2', 100, '%');
+  drawGPUChart('gpuMemoryChart', 'gpuMemoryEmpty', stats.map((point) => ({ value: point.memory })), '#79c7ec', 100, '%');
+  drawGPUChart('gpuTemperatureChart', 'gpuTemperatureEmpty', stats.map((point) => ({ value: point.temperature })), '#efad76', 100, '°');
+}
+
 function setStatus(kind, text) {
   $('status').innerHTML = '';
   const dot = document.createElement('span');
@@ -56,6 +152,38 @@ function renderProcesses(processes) {
   }
 }
 
+function renderCPUCores(values, missingData) {
+  const container = $('cpuCores');
+  container.replaceChildren();
+  if (!Array.isArray(values) || values.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'table-empty';
+    empty.textContent = Array.isArray(missingData) && missingData.includes('cpu_per_core')
+      ? 'Данные по ядрам недоступны'
+      : 'Нет данных по ядрам';
+    container.appendChild(empty);
+    return;
+  }
+  values.forEach((value, index) => {
+    const row = document.createElement('div');
+    row.className = 'core-row';
+    const label = document.createElement('span');
+    label.className = 'core-label';
+    label.textContent = `Ядро ${index}`;
+    const track = document.createElement('div');
+    track.className = 'core-track';
+    const fill = document.createElement('div');
+    fill.className = 'core-fill';
+    fill.style.width = `${Math.max(0, Math.min(100, Number(value) || 0))}%`;
+    track.appendChild(fill);
+    const amount = document.createElement('span');
+    amount.className = 'core-value';
+    amount.textContent = `${Number(value || 0).toFixed(1)}%`;
+    row.append(label, track, amount);
+    container.appendChild(row);
+  });
+}
+
 function applySnapshot(snapshot) {
   $('cpu').textContent = `${Number(snapshot.cpu_percent || 0).toFixed(1)}%`;
   $('cpuSub').textContent = `обновлено ${new Date(snapshot.timestamp).toLocaleTimeString()}`;
@@ -65,6 +193,8 @@ function applySnapshot(snapshot) {
   $('sendSub').textContent = `↑ ${fmtRate(snapshot.network?.send_per_sec || 0)}`;
   $('diskRead').textContent = fmtRate(snapshot.disk_io?.read_per_sec || 0);
   $('diskWrite').textContent = `↑ ${fmtRate(snapshot.disk_io?.write_per_sec || 0)}`;
+  renderCPUCores(snapshot.cpu_per_core, snapshot.missing_data);
+  renderGPUs(snapshot.gpu, snapshot.missing_data);
   $('updatedAt').textContent = new Date(snapshot.timestamp).toLocaleString();
   renderProcesses(snapshot.processes);
 }
@@ -80,6 +210,7 @@ async function loadInitialState() {
     history = Array.isArray(payload.items) ? payload.items : [];
     $('historyCount').textContent = String(history.length);
     drawChart(history);
+    drawGPUCharts(history);
   }
 }
 
@@ -161,6 +292,7 @@ function subscribe() {
       if (history.length > 120) history.shift();
       $('historyCount').textContent = String(history.length);
       drawChart(history);
+      drawGPUCharts(history);
       setStatus('', 'Live');
     } catch {
       setStatus('bad', 'Ошибка данных');
@@ -177,22 +309,43 @@ function formatAIAnswer(answer) {
 
   const parts = [];
 
+  if (answer.status) {
+    parts.push(`Статус: ${answer.status}`);
+  }
+
   if (answer.summary) {
     parts.push(answer.summary);
   }
 
-  if (Array.isArray(answer.facts) && answer.facts.length > 0) {
+  if (Array.isArray(answer.observations) && answer.observations.length > 0) {
     parts.push(
-      'Факты:\n' +
-      answer.facts
-        .map((fact) => {
-          const metric = fact.metric ?? '';
-          const value = fact.value ?? '';
-          const unit = fact.unit ?? '';
+      'Наблюдения:\n' +
+      answer.observations
+        .map((observation) => {
+          const metric = observation.metric ?? '';
+          const value = observation.value ?? '';
+          const unit = observation.unit ?? '';
+          const interpretation = observation.interpretation ?? '';
+          const pid = observation.pid == null ? '' : ` (PID ${observation.pid})`;
+          const detail = interpretation ? ` — ${interpretation}` : '';
 
-          return `• ${metric}: ${value}${unit ? ` ${unit}` : ''}`;
+          return `• ${metric}${pid}: ${value}${unit ? ` ${unit}` : ''}${detail}`;
         })
         .join('\n')
+    );
+  }
+
+  if (Array.isArray(answer.hypotheses) && answer.hypotheses.length > 0) {
+    parts.push(
+      'Гипотезы:\n' +
+      answer.hypotheses.map((hypothesis) => `• ${hypothesis}`).join('\n')
+    );
+  }
+
+  if (Array.isArray(answer.missing_data) && answer.missing_data.length > 0) {
+    parts.push(
+      'Недостающие данные:\n' +
+      answer.missing_data.map((missing) => `• ${missing}`).join('\n')
     );
   }
 

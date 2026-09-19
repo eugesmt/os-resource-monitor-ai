@@ -9,13 +9,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
+	"taskmanager-ai/internal/config"
 	"taskmanager-ai/internal/server"
 	"taskmanager-ai/internal/storage"
 
@@ -25,66 +24,24 @@ import (
 //go:embed all:web
 var webFS embed.FS
 
-type Config struct {
-	Addr              string
-	CollectorInterval time.Duration
-	HistorySize       int
-	MaxProcesses      int
-	AIModel           string
-	AIBaseURL         string
-	AIAPIKey          string
-	AIPrompt          string
-}
-
-func loadConfig() Config {
-	interval := 2 * time.Second
-	if raw := strings.TrimSpace(os.Getenv("COLLECTOR_INTERVAL_MS")); raw != "" {
-		if ms, err := strconv.Atoi(raw); err == nil && ms > 0 {
-			interval = time.Duration(ms) * time.Millisecond
-		}
-	}
-	return Config{
-		Addr:              envOrDefault("ADDR", "127.0.0.1:8080"),
-		CollectorInterval: interval,
-		HistorySize:       envInt("HISTORY_SIZE", 300),
-		MaxProcesses:      envInt("MAX_PROCESSES", 100),
-		AIModel:           envOrDefault("DEEPSEEK_MODEL", "deepseek-v4-flash"),
-		AIBaseURL:         envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-		AIAPIKey:          strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
-		AIPrompt:          strings.TrimSpace(os.Getenv("AI_SYSTEM_PROMPT")),
-	}
-}
-func envInt(key string, fallback int) int {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return fallback
-}
-func envOrDefault(key, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return fallback
-}
-
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if err := godotenv.Load(); err != nil {
 		logger.Warn("failed to load .env", "error", err)
 	}
-	cfg := loadConfig()
+	cfg := config.Load()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	c := collector.New(cfg.MaxProcesses, logger)
-	state := server.NewState(c, storage.NewRingBuffer(cfg.HistorySize), logger)
+	runtime := server.NewRuntime(c, storage.NewRingBuffer(cfg.HistorySize), logger)
 	if cfg.AIAPIKey != "" {
-		state.SetAIAgent(ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), cfg.AIPrompt))
+		agent := ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), ai.DefaultSystemPrompt)
+		agent.SetLogger(logger)
+		runtime.SetAIAgent(agent)
 	}
-	state.Start(ctx, cfg.CollectorInterval)
-	defer state.Stop()
+	runtime.Start(ctx, cfg.CollectorInterval)
+	defer runtime.Stop()
 
 	webRoot, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -92,7 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 	mux := http.NewServeMux()
-	server.RegisterRoutes(mux, state, webRoot)
+	server.RegisterRoutes(mux, runtime, webRoot)
 	srv := &http.Server{Addr: cfg.Addr, Handler: loggingMiddleware(mux, logger), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 
 	go func() {

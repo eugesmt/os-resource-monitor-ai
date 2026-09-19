@@ -1,0 +1,13 @@
+{
+  "manifest_version": "os-assistant-v1.experiment.v1",
+  "eval_set_version": "os-assistant-v1.eval.v1",
+  "grader_version": "os-assistant-v1.grader.v2",
+  "model_version": "offline-fixture",
+  "config_version": "deepseek-generation.v2",
+  "schema_version": "diagnosis.v1",
+  "changed_variable": "prompt_version",
+  "baseline_prompt_version": "os-assistant.prompt.v1",
+  "candidate_prompt_version": "os-assistant.prompt.v1-candidate",
+  "trials": 2,
+  "latency_applicable": false
+}
