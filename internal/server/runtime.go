@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +29,8 @@ type Runtime struct {
 	state   State
 	agentMu sync.RWMutex
 	aiAgent *ai.Agent
+	history ai.HistoryStore
+	askMu   sync.Mutex
 
 	subscriberMu sync.Mutex
 	subscribers  map[chan collector.SystemSnapshot]struct{}
@@ -52,6 +55,12 @@ func NewRuntime(c *collector.Collector, buffer *storage.RingBuffer, logger *slog
 func (s *Runtime) SetAIAgent(agent *ai.Agent) {
 	s.agentMu.Lock()
 	s.aiAgent = agent
+	s.agentMu.Unlock()
+}
+
+func (s *Runtime) SetHistoryStore(store ai.HistoryStore) {
+	s.agentMu.Lock()
+	s.history = store
 	s.agentMu.Unlock()
 }
 
@@ -104,7 +113,26 @@ func (s *Runtime) GetHistory(limit int) []collector.SystemSnapshot {
 	}
 	return s.buffer.GetLast(limit)
 }
+
+func (s *Runtime) GetConversationHistory(ctx context.Context) ([]domain.ConversationEvent, error) {
+	s.agentMu.RLock()
+	store := s.history
+	s.agentMu.RUnlock()
+	if store == nil {
+		return nil, errors.New("conversation history unavailable")
+	}
+	return store.ListEvents(ctx, storage.DefaultConversationID)
+}
 func (s *Runtime) AskAI(ctx context.Context, question string) (*domain.AnalysisResponse, error) {
+	s.askMu.Lock()
+	defer s.askMu.Unlock()
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return nil, errors.New("question is empty")
+	}
+	if len([]rune(question)) > 4000 {
+		return nil, errors.New("question exceeds 4000 characters")
+	}
 	s.agentMu.RLock()
 	agent := s.aiAgent
 	s.agentMu.RUnlock()

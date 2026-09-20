@@ -8,13 +8,15 @@ import (
 )
 
 type Config struct {
-	Addr              string
-	CollectorInterval time.Duration
-	HistorySize       int
-	MaxProcesses      int
-	AIModel           string
-	AIBaseURL         string
-	AIAPIKey          string
+	Addr                 string
+	CollectorInterval    time.Duration
+	HistorySize          int
+	MaxProcesses         int
+	AIModel              string
+	AIBaseURL            string
+	AIAPIKey             string
+	ContextDBPath        string
+	AIContextTokenBudget int
 }
 
 func Load() Config {
@@ -25,13 +27,15 @@ func Load() Config {
 		}
 	}
 	return Config{
-		Addr:              EnvOrDefault("ADDR", "127.0.0.1:8080"),
-		CollectorInterval: interval,
-		HistorySize:       EnvInt("HISTORY_SIZE", 300),
-		MaxProcesses:      EnvInt("MAX_PROCESSES", 100),
-		AIModel:           EnvOrDefault("DEEPSEEK_MODEL", "deepseek-flash"),
-		AIBaseURL:         EnvOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-		AIAPIKey:          strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
+		Addr:                 EnvOrDefault("ADDR", "127.0.0.1:8080"),
+		CollectorInterval:    interval,
+		HistorySize:          EnvInt("HISTORY_SIZE", 300),
+		MaxProcesses:         EnvInt("MAX_PROCESSES", 100),
+		AIModel:              EnvOrDefault("DEEPSEEK_MODEL", "deepseek-flash"),
+		AIBaseURL:            EnvOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+		AIAPIKey:             strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")),
+		ContextDBPath:        EnvOrDefault("CONTEXT_DB_PATH", "taskmanager-context.db"),
+		AIContextTokenBudget: EnvInt("AI_CONTEXT_TOKEN_BUDGET", 8000),
 	}
 }
 

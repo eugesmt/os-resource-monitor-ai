@@ -214,6 +214,26 @@ async function loadInitialState() {
   }
 }
 
+async function restoreConversation() {
+  const response = await fetch('/api/ai/history', { cache: 'no-store' });
+  if (!response.ok) throw new Error('Не удалось восстановить историю диалога');
+  const payload = await response.json();
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  $('chat').replaceChildren();
+  for (const item of items) {
+    if (item.role === 'user') {
+      addMessage('user', String(item.content || ''));
+      continue;
+    }
+    if (item.role !== 'assistant') continue;
+    try {
+      addMessage('ai', formatAIAnswer(JSON.parse(item.content)));
+    } catch {
+      addMessage('ai', 'Сохранённый ответ AI повреждён и не может быть показан.');
+    }
+  }
+}
+
 function addMessage(role, text) {
   const node = document.createElement('div');
   node.className = `message ${role}`;
@@ -305,6 +325,24 @@ function subscribe() {
 function formatAIAnswer(answer) {
   if (!answer || typeof answer !== 'object') {
     return 'Пустой ответ от AI';
+  }
+
+  if (answer.assistant_schema_version === 'assistant.v2') {
+    if (answer.response_type === 'diagnosis' && answer.diagnosis) {
+      return formatAIAnswer(answer.diagnosis);
+    }
+    if (answer.response_type === 'conversation_recall' && answer.conversation_recall) {
+      return answer.conversation_recall.answer || 'Пустой ответ от AI';
+    }
+    if (answer.response_type === 'metric_comparison' && answer.metric_comparison) {
+      const comparison = answer.metric_comparison;
+      const points = Array.isArray(comparison.points) ? comparison.points : [];
+      const renderedPoints = points.map((point) => `${point.metric ?? ''}: ${point.value ?? ''}${point.unit ? ` ${point.unit}` : ''}`).join('\n');
+      return [comparison.answer || '', renderedPoints ? `Наблюдения:\n${renderedPoints}` : ''].filter(Boolean).join('\n\n') || 'Пустой ответ от AI';
+    }
+    if (answer.response_type === 'general_answer' && answer.general_answer) {
+      return answer.general_answer.answer || 'Пустой ответ от AI';
+    }
   }
 
   const parts = [];
@@ -407,8 +445,12 @@ window.addEventListener('resize', () => drawChart(history));
   setStatus('pending', 'Подключение…');
   try {
     await loadInitialState();
+    await restoreConversation();
   } catch {
     setStatus('bad', 'Нет связи с сервером');
+    $('aiError').textContent = 'Не удалось восстановить историю диалога.';
+  } finally {
+    $('sendBtn').disabled = false;
   }
   subscribe();
 })();

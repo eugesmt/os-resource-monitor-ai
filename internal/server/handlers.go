@@ -30,6 +30,9 @@ type aiResponse struct {
 type historyResponse struct {
 	Items []collector.SystemSnapshot `json:"items"`
 }
+type conversationHistoryResponse struct {
+	Items []domain.ConversationEvent `json:"items"`
+}
 
 func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +92,7 @@ func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ai.ErrTimeout) {
 				status = 504
 				publicErr = errors.New("AI service timed out")
-			} else if errors.Is(err, ErrAIUnavailable) || errors.Is(err, ErrSnapshotNotReady) || errors.Is(err, ai.ErrPromptNotConfigured) {
+			} else if errors.Is(err, ErrAIUnavailable) || errors.Is(err, ErrSnapshotNotReady) || errors.Is(err, ai.ErrPromptNotConfigured) || errors.Is(err, ai.ErrConversationPersistence) || errors.Is(err, ai.ErrHistoryUnavailable) || errors.Is(err, ai.ErrRequiredContextTooLarge) {
 				status = 503
 			}
 			state.log.Error("AI request failed", "error", err)
@@ -97,6 +100,18 @@ func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 			return
 		}
 		writeJSON(w, 200, aiResponse{Answer: answer})
+	})
+	mux.HandleFunc("/api/ai/history", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		items, err := state.GetConversationHistory(r.Context())
+		if err != nil {
+			writeAPIError(w, http.StatusServiceUnavailable, errors.New("conversation history temporarily unavailable"))
+			return
+		}
+		writeJSON(w, http.StatusOK, conversationHistoryResponse{Items: items})
 	})
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

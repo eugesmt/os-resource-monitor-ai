@@ -1,6 +1,12 @@
-.PHONY: run test race vet build tidy
+.PHONY: run db-up test race vet build tidy
 
-run:
+CONTEXT_DB_PATH ?= taskmanager-context.db
+export CONTEXT_DB_PATH
+
+db-up:
+	goose -dir migrations sqlite3 "$(CONTEXT_DB_PATH)" up
+
+run: db-up
 	go run ./cmd/server
 
 tidy:

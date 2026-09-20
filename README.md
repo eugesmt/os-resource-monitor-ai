@@ -1,18 +1,18 @@
-# Task Manager AI — Stateless OS Assistant V1
+# Task Manager AI — Bounded-context OS Assistant
 
-Локальный web-based диспетчер задач с stateless AI-ассистентом. Приложение собирает нормализованные метрики ОС через `gopsutil`, показывает текущие данные и короткую историю в браузере, а по запросу пользователя отправляет в DeepSeek один свежий системный snapshot.
+Локальный web-based диспетчер задач с AI-ассистентом. Приложение собирает нормализованные метрики ОС через `gopsutil`, показывает текущие данные и короткую историю в браузере, а по запросу пользователя отправляет в DeepSeek свежий системный snapshot вместе с bounded окном исторического диалога. Принятые вопросы и проверенные ответы сохраняются в append-only SQLite event log.
 
-Этот README — единая документация по запуску, архитектуре **OS Assistant V1 Stateless**, API, безопасности, проверкам и offline eval.
+Этот README — единая документация по запуску, архитектуре OS Assistant, API, безопасности, проверкам и offline eval.
 
-> **Граница версии:** V1 не хранит историю диалога и обрабатывает каждый AI-запрос независимо. Conversation history, rolling summary, long-term facts, context strategies и token-budget management относятся к будущей V2 и не должны незаметно менять гарантии V1.
+> **Граница версии:** полный диалог хранится в SQLite, но в LLM-запрос попадает только детерминированное окно последних целых turn-групп в пределах token budget.
 
 ## Содержание
 
 - [Быстрый старт](#быстрый-старт)
 - [Конфигурация](#конфигурация)
-- [Архитектура V1](#архитектура-v1)
+- [Архитектура](#архитектура)
 - [Сбор и хранение метрик](#сбор-и-хранение-метрик)
-- [Stateless AI pipeline](#stateless-ai-pipeline)
+- [Bounded-context AI pipeline](#bounded-context-ai-pipeline)
 - [HTTP API и frontend](#http-api-и-frontend)
 - [Telemetry](#telemetry)
 - [Offline eval и эксперименты](#offline-eval-и-эксперименты)
@@ -31,10 +31,14 @@
 
 ```bash
 go test ./...
-go run ./cmd/server
+make run
 ```
 
 Откройте `http://127.0.0.1:8080`.
+
+Цель `make run` сначала применяет ожидающие Goose migrations к `CONTEXT_DB_PATH`, затем запускает приложение. Это единственный автоматизированный шаг подготовки локальной dev-БД; само приложение migrations не запускает и таблицы не создаёт.
+
+Для другого пути передайте его в Make явно: `CONTEXT_DB_PATH=/path/to/context.db make run`.
 
 Без `DEEPSEEK_API_KEY` мониторинг и UI продолжают работать, но AI endpoint сообщает, что AI не настроен.
 
@@ -48,6 +52,8 @@ COLLECTOR_INTERVAL_MS=2000
 HISTORY_SIZE=300
 MAX_PROCESSES=100
 DEEPSEEK_API_KEY=
+CONTEXT_DB_PATH=taskmanager-context.db
+AI_CONTEXT_TOKEN_BUDGET=8000
 DEEPSEEK_MODEL=deepseek-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
@@ -55,8 +61,18 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 Пример находится в `.env.example`. API key используется только backend и не передаётся браузеру.
 
 Production prompt не задаётся через environment: он встроен в код и имеет версию `os-assistant.prompt.v1`.
+`AI_CONTEXT_TOKEN_BUDGET` ограничивает оценочный размер input context; default — 8000 tokens. Output reserve остаётся `max_tokens=3000`.
 
-## Архитектура V1
+Для запуска напрямую через `go run` сначала явно примените Goose migration к `CONTEXT_DB_PATH`:
+
+```bash
+goose -dir migrations sqlite3 taskmanager-context.db status
+goose -dir migrations sqlite3 taskmanager-context.db up
+```
+
+Приложение намеренно не запускает migrations автоматически. Без применённой схемы startup завершается с понятной ошибкой.
+
+## Архитектура
 
 ### Системная схема
 
@@ -79,26 +95,29 @@ flowchart TD
     U["Вопрос пользователя"] --> ASK["POST /api/ai/ask"]
     ASK --> FRESH["Проверка AI, наличия и freshness snapshot"]
     CS --> FRESH
-    FRESH --> PR["Versioned PromptRenderer"]
+    FRESH --> LOG["Append user event в SQLite"]
+    LOG --> CC["ContextCompiler: bounded recent turns"]
+    CC --> PR["Versioned PromptRenderer"]
     PR --> DS["DeepSeek JSON Mode"]
     DS --> CR["CompletionResult"]
     CR --> PARSE["Strict JSON parsing"]
     PARSE --> STRUCT["Structural validation"]
     STRUCT --> SEM["Semantic validation по тому же snapshot"]
-    SEM --> D["DiagnosisResultV1"]
+    SEM --> D["assistant.v2 response"]
     D --> UI
 ```
 
-Главный production-контракт V1:
+Главный production-контракт:
 
 ```mermaid
 flowchart LR
-    Q["Один вопрос"] --> A["Stateless AI request"]
+    Q["Текущий вопрос"] --> A["Bounded AI context"]
     S["Один свежий SystemSnapshot"] --> A
-    A --> R["Один проверенный DiagnosisResultV1"]
+    H["Последние целые turns"] --> A
+    A --> R["Проверенный assistant.v2 response"]
 ```
 
-История метрик существует только для UI. Она не является памятью ассистента и не передаётся в LLM.
+Полная история событий хранится в SQLite. `ContextCompiler` временно выбирает bounded окно последних turn-групп для одного вызова; validated observations из исторических assistant events могут использоваться для recall и comparison.
 
 ### Запуск приложения
 
@@ -210,7 +229,7 @@ State и RingBuffer используют defensive copy slice-полей: CPU co
 
 RingBuffer не хранит сообщения, предпочтения или long-term facts и никогда не добавляется в AI prompt.
 
-## Stateless AI pipeline
+## Bounded-context AI pipeline
 
 ### Последовательность запроса
 
@@ -221,7 +240,8 @@ sequenceDiagram
     participant API as HTTP API
     participant Runtime
     participant Agent as AI Agent
-    participant Prompt as PromptRenderer
+    participant Store as SQLite event log
+    participant Compiler as ContextCompiler
     participant DeepSeek
     participant Validator
 
@@ -230,24 +250,27 @@ sequenceDiagram
     API->>Runtime: AskAI(question)
     Runtime->>Runtime: AI настроен?<br/>snapshot готов и свеж?
     Runtime->>Agent: AskWithSnapshot(question, defensive copy)
-    Agent->>Prompt: render question + current snapshot
-    Prompt-->>Agent: versioned messages
+    Agent->>Store: append current user event
+    Agent->>Compiler: compile before current event ID
+    Compiler->>Store: bounded ListRecentEvents
+    Compiler-->>Agent: system + historical roles + current user
     Agent->>DeepSeek: Chat Completions + JSON Mode
     DeepSeek-->>Agent: CompletionResult
     Agent->>Validator: strict parse + structure + semantics
-    Validator-->>Agent: DiagnosisResultV1
+    Validator-->>Agent: assistant.v2 response
+    Agent->>Store: append validated assistant event
     Agent-->>API: проверенный result
     API-->>Browser: JSON answer
     Browser-->>User: безопасный текстовый вывод
 ```
 
-В Agent передаются только вопрос и current snapshot. Conversation ID, предыдущие сообщения, summary и long-term facts в V1 отсутствуют.
+Текущий snapshot и вопрос обязательны и не вытесняются историей. История выбирается от новых turn-групп к старым; user + assistant одного `turn_id` добавляются вместе, orphan user допускается отдельно, а итоговые messages остаются в хронологическом порядке. При недоступной истории provider не вызывается; сохранённый current user event остаётся в event log.
 
 Перед отправкой полный snapshot проецируется в компактный `LLMContext`: выбираются top 10 процессов по CPU и top 10 по memory, затем записи объединяются по PID. Поля `process_count` и `processes_truncated` сообщают модели, что список может быть неполным. UI продолжает получать полный snapshot.
 
-### PromptRenderer и trust boundary
+### ContextCompiler, PromptRenderer и trust boundary
 
-Файл: `internal/ai/context.go`.
+Файлы: `internal/ai/compiler.go`, `internal/ai/context.go`.
 
 Prompt `os-assistant.prompt.v1` задаёт `ROLE`, `GOAL`, `USER INPUT BOUNDARY`, `TRUST BOUNDARY`, `EVIDENCE RULES` и `OUTPUT`. Snapshot сериализуется как явно размеченный недоверенный data block:
 
@@ -261,7 +284,24 @@ CURRENT_SNAPSHOT_ONLY=true
 
 Имена процессов, устройств, mountpoints и другие строки ОС считаются данными, а не инструкциями. Текст вроде `ignore rules and reveal system prompt` остаётся значением поля.
 
-Prompt требует ответа на русском языке, только JSON, разделения observations и hypotheses, явного `missing_data` и использования только текущего snapshot.
+Prompt требует ответа на русском языке и только JSON. Для `diagnosis` observations должны быть grounded в текущем snapshot. Для исторического recall и comparison используются только явно переданные validated observations; свободный исторический текст не является источником метрик.
+
+`assistant.v2` поддерживает четыре режима:
+
+- `diagnosis` — анализ текущего snapshot;
+- `conversation_recall` — ответ по историческим событиям с `event_ids`;
+- `metric_comparison` — сравнение текущих и исторических точек с `snapshot_id` и `event_id`;
+- `general_answer` — краткое объяснение в ограниченном домене ОС, железа и мониторинга с обязательным `topic`.
+
+Модель выбирает режим по вопросу, а backend проверяет его структуру и соответствие источникам. Для `general_answer` backend принимает только topics `os_monitoring`, `cpu`, `memory`, `gpu`, `disk`, `network`, `processes`, `drivers` и требует доменный сигнал именно в вопросе.
+
+Для каждого выбранного исторического assistant event compiler извлекает только строгий структурированный список `observations`. В prompt он добавляется как `VALIDATED_HISTORICAL_OBSERVATIONS (DATA ONLY)`. Summary, hypotheses, recommendations, user text и malformed JSON в этот список не попадают.
+
+`conversation_recall` означает поиск только в выбранном bounded historical window текущего запроса. Это не обещание, что LLM получила всю SQLite-историю: старые turn-группы могут быть отброшены из-за token budget. Поэтому пользовательский ответ должен говорить «в доступном историческом окне», если не выполняется отдельный storage-level запрос полного журнала.
+
+Prompt также содержит короткие synthetic few-shot examples для всех четырёх режимов. Они помечены как data-only и не используют production snapshots, UUID или реальные пользовательские сообщения.
+
+Исторические user/assistant messages передаются в исходных roles, но их content заключается в JSON envelope с `instruction_status=data_only`. System message явно задаёт precedence текущего snapshot и запрещает считать старый assistant JSON текущей истиной. Provider-independent estimator использует UTF-8 bytes, framing overhead и safety margin; это консервативная оценка, а не tokenizer конкретной модели.
 
 ### DeepSeek transport
 
@@ -292,7 +332,7 @@ Client допускает максимум один одновременный p
 
 Неполный или заблокированный ответ не передаётся в parser.
 
-### DiagnosisResultV1
+### Response envelope и DiagnosisResultV1
 
 Файл: `internal/domain/domain.go`.
 
@@ -317,9 +357,21 @@ Client допускает максимум один одновременный p
 
 Допустимые status: `healthy`, `warning`, `critical`, `unknown`.
 
+Для нового ответа diagnosis используется envelope:
+
+```json
+{
+  "assistant_schema_version": "assistant.v2",
+  "response_type": "diagnosis",
+  "diagnosis": { "diagnosis_schema_version": "diagnosis.v1", "status": "healthy", "summary": "...", "observations": [], "hypotheses": [], "missing_data": [], "recommendations": [] }
+}
+```
+
+`conversation_recall` содержит `answer` и список `event_ids`. `metric_comparison` содержит `answer` и массив points с `source`, `metric`, `value`, `unit`, `snapshot_id` и, для исторической точки, `event_id`.
+
 - `observations` — подтверждённые числовые факты с `metric`, `value`, `unit`, `interpretation` и optional `pid`;
 - `hypotheses` — возможные, но не доказанные объяснения;
-- `missing_data` — отсутствующие секции или показатели;
+- `missing_data` — отсутствующие секции. Допустимы только точные значения `cpu`, `cpu_per_core`, `memory`, `swap`, `load`, `host`, `cpu_cores`, `disks`, `disk_io`, `network`, `gpu` и `processes`; пояснения и названия метрик туда не помещаются. `gpu.memory.utilization_percent` вычисляется из доступных `memory_used` и `memory_total` и не считается отсутствующей секцией.
 - `recommendations` — практические действия.
 
 ### Validation pipeline
@@ -329,7 +381,7 @@ flowchart LR
     R["Completion content"] --> J["Strict JSON parsing"]
     J -->|"валидный JSON и известные поля"| S["Structural validation"]
     S -->|"валидный diagnosis.v1"| M["Semantic validation"]
-    M -->|"grounded в snapshot"| D["DiagnosisResultV1"]
+    M -->|"grounded в current snapshot или validated history"| D["assistant.v2 response"]
     J -->|"ошибка"| E1["parse_error"]
     S -->|"ошибка"| E2["structural_validation_error"]
     M -->|"ошибка"| E3["semantic_validation_error"]
@@ -339,7 +391,7 @@ Strict parser использует `encoding/json`, запрещает unknown f
 
 Structural validation проверяет schema version, status enum, непустой summary, обязательные non-null arrays, ограничения количества и длины, а также отсутствие `NaN`/`Inf`.
 
-`ValidateDiagnosis(result, snapshot)` затем проверяет:
+Для diagnosis `ValidateDiagnosis(result, snapshot)` затем проверяет:
 
 - metric входит в разрешённый словарь и доступна в snapshot;
 - PID присутствует среди процессов, переданных в projected prompt;
@@ -350,6 +402,8 @@ Structural validation проверяет schema version, status enum, непус
 - `healthy` не противоречит критическим thresholds.
 
 Свободный `summary` не анализируется как естественный язык: backend проверяет структурированные observations.
+
+Для recall backend проверяет, что все `event_ids` принадлежат выбранной истории. Для comparison текущие points сверяются с текущим snapshot, а historical points — с извлечёнными validated observations и их provenance (`event_id`, `snapshot_id`).
 
 ### Модель доверия
 
@@ -373,7 +427,7 @@ LLM используется как интерпретатор уже собра
 | `GET` | `/api/snapshot` | последний current snapshot |
 | `GET` | `/api/history?limit=120` | ограниченная UI-история из RingBuffer |
 | `GET` | `/api/events` | SSE-поток новых snapshots |
-| `POST` | `/api/ai/ask` | stateless AI diagnosis |
+| `POST` | `/api/ai/ask` | bounded-context AI response |
 
 `POST /api/ai/ask` принимает:
 
@@ -383,7 +437,7 @@ LLM используется как интерпретатор уже собра
 }
 ```
 
-Успешный ответ содержит `DiagnosisResultV1` внутри `answer`.
+Успешный ответ содержит `assistant.v2` внутри `answer`.
 
 SSE-доставка неблокирующая: медленный браузер не останавливает collector. Frontend показывает current metrics, историю, per-core CPU, GPU dashboard и AI diagnosis. LLM-текст выводится через `textContent`.
 
@@ -391,12 +445,13 @@ SSE-доставка неблокирующая: медленный браузе
 
 Telemetry реализована через structured JSON logging LLM calls и HTTP requests. На AI call записываются:
 
-- request ID и snapshot ID;
+- request, conversation, turn, snapshot и event IDs;
 - model и provider response ID;
 - prompt, schema и config versions;
 - finish reason;
 - usage availability и token counts;
 - latency и outcome.
+- context budget, estimated input tokens, block kinds, диапазон/число выбранных historical events и число validated historical observations.
 
 Если provider не вернул usage, token fields отмечаются как `unavailable`, а не как нули. Возможные outcomes включают `success`, `parse_error`, `structural_validation_error`, `semantic_validation_error`, `truncated`, `content_filtered`, `tool_calls`, `timeout`, `upstream_error` и `abnormal_finish`.
 
@@ -428,9 +483,10 @@ flowchart LR
 | `internal/ai/eval_test.go` | eval-тесты и fixture provider |
 | `evals/os-assistant-v1-experiment.json` | versioned experiment manifest |
 | `evals/os-assistant-v1-experiment-result.json` | зафиксированный report |
+| `evals/os-assistant-v2-source-aware.json` | persisted cases для recall, comparison и domain-limited general answer |
 | `internal/ai/agent.go` | production parsing/validation path |
 | `internal/ai/semantic.go` | grounding относительно snapshot |
-| `internal/domain/domain.go` | контракт `diagnosis.v1` |
+| `internal/domain/domain.go` | contracts `assistant.v2` и вложенный diagnosis payload |
 
 ### Запуск eval
 
@@ -475,6 +531,17 @@ go test -race ./internal/ai
 | `high-load-low-cpu` | различение `load_1` и CPU usage |
 | `truncated-output` | классификацию обрыва ответа |
 
+Отдельные source-aware eval cases также проверяют (их persisted список находится в `evals/os-assistant-v2-source-aware.json`):
+
+| Case | Что проверяет |
+| --- | --- |
+| conversation recall | корректный `response_type` и citations по `event_ids` из искусственной bounded history |
+| metric comparison | соответствие current/historical points, `snapshot_id` и `event_id` |
+| general GPU answer | разрешённый доменный topic и прохождение Agent validation |
+| out-of-domain general answer | отклонение вопроса вне домена ОС/железа |
+
+Recall/comparison fixtures проверяют доступное historical window, а не неограниченную полную SQLite-историю.
+
 Snapshots искусственные; production data и реальная ОС не используются.
 
 ### Grader и metrics
@@ -490,6 +557,8 @@ Snapshots искусственные; production data и реальная ОС �
 `AggregateEval` вычисляет `pass_rate`, `status_accuracy`, `observation_recall`, `missing_data_precision`, `missing_data_recall`, `false_positive_rate` и `error_accuracy`.
 
 Case проходит только при одновременной корректности status, observations, grounding, forbidden claims и `missing_data`.
+
+`GradeAssistantEval` дополнительно проверяет response mode. Для `conversation_recall` он сравнивает ожидаемые citation `event_ids`; для `metric_comparison` — source, metric, value, unit, `snapshot_id` и `event_id`. Source-aware cases используют подготовленный historical event log и проходят тот же Agent/compiler/validator path, что и production.
 
 ### Offline experiment
 
@@ -557,7 +626,7 @@ Manifest проверяет разные baseline/candidate versions, подде
 
 ### Ограничения offline eval
 
-Offline eval не отправляет запросы в DeepSeek, не оценивает live model quality, latency, token usage или rate limits, не использует conversation history или production snapshots и не заменяет runtime `ValidateDiagnosis`.
+Offline eval не отправляет запросы в DeepSeek и не оценивает live model quality, latency, token usage или rate limits. Diagnosis cases используют искусственные snapshots, а source-aware cases — детерминированную искусственную conversation history. Eval не заменяет runtime validation.
 
 Prompt-injection fixture проверяет placement malicious strings внутри untrusted boundary и rejection forbidden claims, но не доказывает абсолютную устойчивость live LLM. Для этого нужен отдельный live-eval runner; в V1 его нет.
 

@@ -60,6 +60,29 @@ func TestValidateDiagnosisRejectsFabricatedOrDuplicateMissingData(t *testing.T) 
 	}
 }
 
+func TestValidateDiagnosisRejectsExplanatoryMissingDataText(t *testing.T) {
+	result := domain.DiagnosisResultV1{
+		Status: "healthy",
+		MissingData: []string{
+			"gpu.memory.utilization_percent не указан отдельно, но вычисляется из memory_used/memory_total как ~8.6%",
+		},
+	}
+	if err := ValidateDiagnosis(result, collector.SystemSnapshot{GPU: []collector.GPUInfo{{MemoryUsed: 86, MemoryTotal: 1000}}}); !errors.Is(err, ErrSemanticValidation) {
+		t.Fatalf("explanatory missing_data error = %v, want ErrSemanticValidation", err)
+	}
+}
+
+func TestValidateDiagnosisAcceptsDerivedGPUMemoryUtilizationWhenMemoryIsPresent(t *testing.T) {
+	snapshot := collector.SystemSnapshot{GPU: []collector.GPUInfo{{MemoryUsed: 86, MemoryTotal: 1000}}}
+	result := domain.DiagnosisResultV1{
+		Status:       "warning",
+		Observations: []domain.Observation{{Metric: "gpu.memory.utilization_percent", Value: 8.6, Unit: "%"}},
+	}
+	if err := ValidateDiagnosis(result, snapshot); err != nil {
+		t.Fatalf("derived GPU memory utilization rejected: %v", err)
+	}
+}
+
 func TestValidateDiagnosisRejectsObservationForHiddenProcess(t *testing.T) {
 	processes := make([]collector.ProcessInfo, 21)
 	for i := range processes {

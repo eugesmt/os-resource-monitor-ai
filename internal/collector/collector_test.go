@@ -2,8 +2,10 @@ package collector
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/shirou/gopsutil/v3/load"
 	"github.com/shirou/gopsutil/v3/mem"
@@ -37,6 +39,33 @@ func TestCollectWithProbesPreservesZeroAndIdentity(t *testing.T) {
 	}
 	if snapshot.SnapshotID == "" || snapshot.CapturedAt.IsZero() || snapshot.CPUPercent != 0 || len(snapshot.CPUPerCore) != 4 || has(snapshot.MissingData, "cpu") {
 		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+func TestCollectWithProbesGeneratesUniqueSnapshotUUIDv4(t *testing.T) {
+	first, err := New(10, nil).CollectWithProbes(testProbes())
+	if err != nil {
+		t.Fatalf("first CollectWithProbes() error = %v", err)
+	}
+	second, err := New(10, nil).CollectWithProbes(testProbes())
+	if err != nil {
+		t.Fatalf("second CollectWithProbes() error = %v", err)
+	}
+	if first.SnapshotID == second.SnapshotID {
+		t.Fatalf("snapshot IDs are equal: %q", first.SnapshotID)
+	}
+	for _, snapshot := range []SystemSnapshot{first, second} {
+		raw := strings.TrimPrefix(snapshot.SnapshotID, "snap-")
+		if raw == snapshot.SnapshotID {
+			t.Fatalf("snapshot ID %q has no snap- prefix", snapshot.SnapshotID)
+		}
+		parsed, err := uuid.Parse(raw)
+		if err != nil || parsed[6]>>4 != 4 || parsed[8]>>6 != 2 {
+			t.Fatalf("snapshot ID %q is not RFC 9562 UUIDv4: bytes=%x err=%v", snapshot.SnapshotID, parsed, err)
+		}
+		if snapshot.CapturedAt.IsZero() || !snapshot.CapturedAt.Equal(snapshot.Timestamp) {
+			t.Fatalf("snapshot timestamps changed semantics: %#v", snapshot)
+		}
 	}
 }
 

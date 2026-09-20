@@ -120,7 +120,7 @@ func NewClient(apiKey, baseURL, model string) *Client {
 
 func (c *Client) Config() GenerationConfig { return c.config }
 
-func (c *Client) Complete(ctx context.Context, systemPrompt, userContent string) (result CompletionResult, err error) {
+func (c *Client) Complete(ctx context.Context, request CompletionRequest) (result CompletionResult, err error) {
 	started := time.Now()
 	result = CompletionResult{Model: c.config.Model, ConfigVersion: c.config.Version, Usage: CompletionUsage{Available: false}}
 	defer func() { result.Latency = time.Since(started) }()
@@ -133,7 +133,15 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userContent string)
 	requestCtx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	c.usageTracker.reset()
-	resp, err := c.client.CreateChatCompletion(requestCtx, openai.ChatCompletionRequest{Model: c.config.Model, Messages: []openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleSystem, Content: systemPrompt}, {Role: openai.ChatMessageRoleUser, Content: userContent}}, MaxTokens: c.config.MaxTokens, ResponseFormat: &openai.ChatCompletionResponseFormat{Type: openai.ChatCompletionResponseFormatTypeJSONObject}})
+	messages := make([]openai.ChatCompletionMessage, 0, len(request.Messages))
+	for _, message := range request.Messages {
+		messages = append(messages, openai.ChatCompletionMessage{Role: message.Role, Content: message.Content})
+	}
+	maxTokens := request.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = c.config.MaxTokens
+	}
+	resp, err := c.client.CreateChatCompletion(requestCtx, openai.ChatCompletionRequest{Model: c.config.Model, Messages: messages, MaxTokens: maxTokens, ResponseFormat: &openai.ChatCompletionResponseFormat{Type: openai.ChatCompletionResponseFormatTypeJSONObject}})
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return result, ctx.Err()

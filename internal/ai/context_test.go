@@ -28,6 +28,24 @@ func TestBuildContextIncludesKeySections(t *testing.T) {
 	}
 }
 
+func TestDefaultSystemPromptDefinesCanonicalMissingDataAndDerivedGPUMetric(t *testing.T) {
+	for _, section := range []string{"cpu", "cpu_per_core", "memory", "swap", "load", "host", "cpu_cores", "disks", "disk_io", "network", "gpu", "processes"} {
+		if !strings.Contains(DefaultSystemPrompt, section) {
+			t.Fatalf("system prompt does not enumerate missing_data section %q", section)
+		}
+	}
+	for _, want := range []string{
+		"missing_data может содержать только точные идентификаторы секций",
+		"Не помещай туда пояснения",
+		"gpu.memory.utilization_percent — производная метрика",
+		"memory_used / memory_total * 100",
+	} {
+		if !strings.Contains(DefaultSystemPrompt, want) {
+			t.Fatalf("system prompt missing contract text %q", want)
+		}
+	}
+}
+
 func TestProjectSnapshotSelectsTopCPUAndMemoryProcesses(t *testing.T) {
 	processes := make([]collector.ProcessInfo, 25)
 	for i := range processes {

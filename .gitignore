@@ -16,6 +16,7 @@ frontend/node_modules/
 # Go build/test artifacts
 /bin/
 /dist/
+/artifacts/
 *.exe
 *.test
 coverage.out
@@ -28,4 +29,5 @@ Thumbs.db
 AGENTS.md
 
 # Local learning materials
-/guides/
+/docs/
+/taskmanager-context.db*

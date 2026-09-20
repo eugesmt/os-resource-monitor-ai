@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+func testCompletionRequest() CompletionRequest {
+	return CompletionRequest{Messages: []ModelMessage{
+		{Role: "system", Content: "system"},
+		{Role: "user", Content: "historical user"},
+		{Role: "assistant", Content: "historical assistant"},
+		{Role: "user", Content: "current user"},
+	}, MaxTokens: DefaultMaxTokens}
+}
+
 func TestClientCompleteSendsModelAndMessages(t *testing.T) {
 	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
@@ -28,20 +37,21 @@ func TestClientCompleteSendsModelAndMessages(t *testing.T) {
 			t.Errorf("response_format = %v", format)
 		}
 		messages, ok := request["messages"].([]any)
-		if !ok || len(messages) != 2 {
+		if !ok || len(messages) != 4 {
 			t.Fatalf("messages = %v", request["messages"])
 		}
-		first, _ := messages[0].(map[string]any)
-		second, _ := messages[1].(map[string]any)
-		if first["role"] != "system" || first["content"] != "system" ||
-			second["role"] != "user" || second["content"] != "content" {
-			t.Fatalf("messages = %v", messages)
+		want := []ModelMessage{{Role: "system", Content: "system"}, {Role: "user", Content: "historical user"}, {Role: "assistant", Content: "historical assistant"}, {Role: "user", Content: "current user"}}
+		for i, expected := range want {
+			message, _ := messages[i].(map[string]any)
+			if message["role"] != expected.Role || message["content"] != expected.Content {
+				t.Fatalf("messages = %v", messages)
+			}
 		}
 		_, _ = w.Write([]byte(`{"id":"resp-1","model":"test-model","usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5},"choices":[{"finish_reason":"stop","message":{"content":"  answer  "}}]}`))
 	}))
 	defer server.Close()
 
-	answer, err := NewClient("key", server.URL, "test-model").Complete(context.Background(), "system", "content")
+	answer, err := NewClient("key", server.URL, "test-model").Complete(context.Background(), testCompletionRequest())
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -55,7 +65,7 @@ func TestClientCompleteEmptyChoices(t *testing.T) {
 		_, _ = w.Write([]byte(`{"choices":[]}`))
 	}))
 	defer server.Close()
-	result, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", "content")
+	result, err := NewClient("key", server.URL, "model").Complete(context.Background(), testCompletionRequest())
 	if err == nil || !strings.Contains(err.Error(), "empty response") {
 		t.Fatalf("error = %v", err)
 	}
@@ -71,7 +81,7 @@ func TestClientCompleteRejectsAbnormalFinishReasons(t *testing.T) {
 				_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"` + reason + `","message":{"content":"{}"}}]}`))
 			}))
 			defer server.Close()
-			_, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", "content")
+			_, err := NewClient("key", server.URL, "model").Complete(context.Background(), testCompletionRequest())
 			if err == nil {
 				t.Fatal("Complete() error = nil")
 			}
@@ -96,7 +106,7 @@ func TestClientCompleteUpstreamError(t *testing.T) {
 		http.Error(w, `{"error":{"message":"bad upstream"}}`, http.StatusBadGateway)
 	}))
 	defer server.Close()
-	result, err := NewClient("key", server.URL, "model").Complete(context.Background(), "system", "content")
+	result, err := NewClient("key", server.URL, "model").Complete(context.Background(), testCompletionRequest())
 	if err == nil || !strings.Contains(err.Error(), "AI request failed") {
 		t.Fatalf("error = %v", err)
 	}
@@ -108,7 +118,7 @@ func TestClientCompleteUpstreamError(t *testing.T) {
 func TestClientCompleteCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	result, err := NewClient("key", "http://127.0.0.1:1", "model").Complete(ctx, "system", "content")
+	result, err := NewClient("key", "http://127.0.0.1:1", "model").Complete(ctx, testCompletionRequest())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
@@ -122,7 +132,7 @@ func TestClientCompleteDeadlineContext(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	result, err := NewClient("key", server.URL, "model").Complete(ctx, "system", "content")
+	result, err := NewClient("key", server.URL, "model").Complete(ctx, testCompletionRequest())
 	if err == nil || !errors.Is(err, ErrTimeout) {
 		t.Fatalf("error = %v", err)
 	}

@@ -39,6 +39,10 @@ type EvalCase struct {
 	ExpectedMetrics      []string // Compatibility for small package-local callers.
 	ForbiddenMetrics     []string
 	ForbiddenPIDs        []int32
+	ExpectedResponseType domain.ResponseType
+	History              []domain.ConversationEvent
+	ExpectedEventIDs     []int64
+	ExpectedPoints       []domain.MetricPoint
 }
 
 type EvalResult struct {
@@ -56,6 +60,9 @@ type EvalResult struct {
 	UnsupportedClaims         int
 	ErrorClass                string
 	Error                     string
+	ResponseTypeCorrect       bool
+	CitationsMatched          bool
+	ComparisonPointsMatched   bool
 }
 
 type EvalMetrics struct {
@@ -174,6 +181,8 @@ func classifyEvalError(err error) string {
 		return "parse_error"
 	case errors.Is(err, ErrResponseStructure):
 		return "structural_validation_error"
+	case errors.Is(err, ErrSemanticValidation):
+		return "semantic_validation_error"
 	default:
 		return "completion_error"
 	}
@@ -186,18 +195,142 @@ func GradeEvalError(c EvalCase, err error) EvalResult {
 	return out
 }
 
+func GradeAssistantEval(c EvalCase, result domain.AssistantResponseV2) EvalResult {
+	want := c.ExpectedResponseType
+	if want == "" {
+		want = domain.ResponseTypeDiagnosis
+	}
+	out := EvalResult{CaseName: c.Name, ResponseTypeCorrect: result.ResponseType == want}
+	if !out.ResponseTypeCorrect {
+		out.Error = "unexpected response type"
+		return out
+	}
+	switch want {
+	case domain.ResponseTypeDiagnosis:
+		if result.Diagnosis == nil {
+			out.Error = "missing diagnosis"
+			return out
+		}
+		graded := GradeEval(c, *result.Diagnosis)
+		graded.ResponseTypeCorrect = true
+		return graded
+	case domain.ResponseTypeConversationRecall:
+		if result.ConversationRecall == nil {
+			out.Error = "missing conversation recall"
+			return out
+		}
+		got := append([]int64(nil), result.ConversationRecall.EventIDs...)
+		wantIDs := append([]int64(nil), c.ExpectedEventIDs...)
+		sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+		sort.Slice(wantIDs, func(i, j int) bool { return wantIDs[i] < wantIDs[j] })
+		out.CitationsMatched = len(got) == len(wantIDs)
+		if out.CitationsMatched {
+			for i := range got {
+				if got[i] != wantIDs[i] {
+					out.CitationsMatched = false
+					break
+				}
+			}
+		}
+		out.Pass = out.CitationsMatched && result.ConversationRecall.Answer != ""
+		return out
+	case domain.ResponseTypeMetricComparison:
+		if result.MetricComparison == nil {
+			out.Error = "missing metric comparison"
+			return out
+		}
+		out.ComparisonPointsMatched = compareMetricPoints(result.MetricComparison.Points, c.ExpectedPoints)
+		out.Pass = out.ComparisonPointsMatched && result.MetricComparison.Answer != ""
+		return out
+	case domain.ResponseTypeGeneralAnswer:
+		if result.GeneralAnswer == nil {
+			out.Error = "missing general answer"
+			return out
+		}
+		out.Pass = result.GeneralAnswer.Answer != "" && allowedGeneralTopics[result.GeneralAnswer.Topic]
+		return out
+	default:
+		out.Error = "unsupported expected response type"
+		return out
+	}
+}
+
+func compareMetricPoints(got, want []domain.MetricPoint) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	used := make([]bool, len(want))
+	for _, point := range got {
+		found := false
+		for i, expected := range want {
+			if used[i] || point.Source != expected.Source || point.Metric != expected.Metric || point.Unit != expected.Unit || point.SnapshotID != expected.SnapshotID || point.EventID == nil != (expected.EventID == nil) || (point.EventID != nil && *point.EventID != *expected.EventID) || math.Abs(point.Value-expected.Value) > math.Max(0.1, math.Abs(expected.Value)*0.02) {
+				continue
+			}
+			used[i], found = true, true
+			break
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 // RunEvalCase deliberately goes through Agent parsing and semantic validation.
 // Its completion implementation is supplied by an offline test/runner.
 func RunEvalCase(ctx context.Context, c EvalCase, provider completion) EvalResult {
 	return runEvalCaseWithPrompt(ctx, c, provider, DefaultSystemPrompt)
 }
 
+type evalHistoryStore struct {
+	events []domain.ConversationEvent
+}
+
+func (s *evalHistoryStore) append(conversationID, turnID string, role domain.EventRole, content, snapshotID string) (domain.ConversationEvent, error) {
+	event := domain.ConversationEvent{ID: int64(len(s.events) + 1), ConversationID: conversationID, TurnID: turnID, Role: role, Content: content, SnapshotID: snapshotID}
+	s.events = append(s.events, event)
+	return event, nil
+}
+
+func (s *evalHistoryStore) AppendUser(_ context.Context, conversationID, turnID, content, snapshotID string) (domain.ConversationEvent, error) {
+	return s.append(conversationID, turnID, domain.EventRoleUser, content, snapshotID)
+}
+
+func (s *evalHistoryStore) AppendAssistant(_ context.Context, conversationID, turnID, content, snapshotID string) (domain.ConversationEvent, error) {
+	return s.append(conversationID, turnID, domain.EventRoleAssistant, content, snapshotID)
+}
+
+func (s *evalHistoryStore) ListEvents(_ context.Context, conversationID string) ([]domain.ConversationEvent, error) {
+	items := make([]domain.ConversationEvent, 0, len(s.events))
+	for _, event := range s.events {
+		if event.ConversationID == conversationID {
+			items = append(items, event)
+		}
+	}
+	return items, nil
+}
+
+func (s *evalHistoryStore) ListRecentEvents(_ context.Context, conversationID string, beforeEventID int64, limit int) ([]domain.ConversationEvent, error) {
+	items := make([]domain.ConversationEvent, 0, limit)
+	for i := len(s.events) - 1; i >= 0 && len(items) < limit; i-- {
+		event := s.events[i]
+		if event.ConversationID == conversationID && event.ID < beforeEventID {
+			items = append(items, event)
+		}
+	}
+	for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
+		items[left], items[right] = items[right], items[left]
+	}
+	return items, nil
+}
+
 func runEvalCaseWithPrompt(ctx context.Context, c EvalCase, provider completion, systemPrompt string) EvalResult {
-	result, err := newAgent(provider, systemPrompt).AskWithSnapshot(ctx, c.Question, c.Snapshot)
+	history := &evalHistoryStore{events: append([]domain.ConversationEvent(nil), c.History...)}
+	result, err := newAgent(provider, systemPrompt, history).AskWithSnapshot(ctx, c.Question, c.Snapshot)
 	if err != nil {
 		return GradeEvalError(c, err)
 	}
-	return GradeEval(c, *result)
+	return GradeAssistantEval(c, *result)
 }
 
 func AggregateEval(results []EvalResult) EvalMetrics {
@@ -363,7 +496,12 @@ type offlineVariantCompletion struct {
 	caseDef  EvalCase
 }
 
-func (c offlineVariantCompletion) Complete(ctx context.Context, systemPrompt, userContent string) (CompletionResult, error) {
+func (c offlineVariantCompletion) Complete(ctx context.Context, request CompletionRequest) (CompletionResult, error) {
+	var systemPrompt, userContent string
+	if len(request.Messages) > 0 {
+		systemPrompt = request.Messages[0].Content
+		userContent = request.Messages[len(request.Messages)-1].Content
+	}
 	return c.provider(ctx, c.variant, c.trial, c.caseDef, systemPrompt, userContent)
 }
 
@@ -452,6 +590,7 @@ func unknownDiagnosis(missing ...string) domain.DiagnosisResultV1 {
 }
 
 func marshalFixtureResult(result domain.DiagnosisResultV1) string {
-	data, _ := json.Marshal(result)
+	envelope := domain.AssistantResponseV2{SchemaVersion: domain.AssistantSchemaVersion, ResponseType: domain.ResponseTypeDiagnosis, Diagnosis: &result}
+	data, _ := json.Marshal(envelope)
 	return string(data)
 }

@@ -35,6 +35,123 @@ func ValidateDiagnosis(result domain.DiagnosisResultV1, snapshot collector.Syste
 	return nil
 }
 
+func ValidateAssistantResponse(result domain.AssistantResponseV2, evidence ContextEvidence) error {
+	switch result.ResponseType {
+	case domain.ResponseTypeDiagnosis:
+		if result.Diagnosis == nil {
+			return fmt.Errorf("%w: missing diagnosis", ErrSemanticValidation)
+		}
+		return ValidateDiagnosis(*result.Diagnosis, evidence.CurrentSnapshot)
+	case domain.ResponseTypeConversationRecall:
+		if result.ConversationRecall == nil {
+			return fmt.Errorf("%w: missing recall", ErrSemanticValidation)
+		}
+		for _, id := range result.ConversationRecall.EventIDs {
+			event, ok := evidence.Events[id]
+			if !ok || event.ID >= evidence.BeforeEventID || event.ConversationID != evidence.ConversationID {
+				return fmt.Errorf("%w: citation event %d is not in selected history", ErrSemanticValidation, id)
+			}
+		}
+		return nil
+	case domain.ResponseTypeMetricComparison:
+		if result.MetricComparison == nil {
+			return fmt.Errorf("%w: missing comparison", ErrSemanticValidation)
+		}
+		currentCount, historicalCount := 0, 0
+		for _, point := range result.MetricComparison.Points {
+			switch point.Source {
+			case "current_snapshot":
+				currentCount++
+				if point.SnapshotID != evidence.CurrentSnapshot.SnapshotID {
+					return fmt.Errorf("%w: current point snapshot mismatch", ErrSemanticValidation)
+				}
+				if err := validateObservation(domain.Observation{Metric: point.Metric, Value: point.Value, Unit: point.Unit, PID: point.PID}, evidence.CurrentSnapshot); err != nil {
+					return err
+				}
+			case "historical_observation":
+				historicalCount++
+				if point.EventID == nil {
+					return fmt.Errorf("%w: historical point missing event", ErrSemanticValidation)
+				}
+				found := false
+				for _, historical := range evidence.HistoricalObservations {
+					if historical.EventID == *point.EventID && historical.SnapshotID == point.SnapshotID && historical.Observation.Metric == point.Metric && normalizeUnit(historical.Observation.Unit) == normalizeUnit(point.Unit) && samePID(historical.Observation.PID, point.PID) {
+						if math.Abs(historical.Observation.Value-point.Value) > math.Max(0.1, math.Abs(historical.Observation.Value)*0.02) {
+							return fmt.Errorf("%w: historical point value mismatch", ErrSemanticValidation)
+						}
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("%w: historical point is not validated evidence", ErrSemanticValidation)
+				}
+			default:
+				return fmt.Errorf("%w: unknown comparison source", ErrSemanticValidation)
+			}
+		}
+		if currentCount == 0 || historicalCount == 0 {
+			return fmt.Errorf("%w: comparison requires current and historical points", ErrSemanticValidation)
+		}
+		return nil
+	case domain.ResponseTypeGeneralAnswer:
+		if result.GeneralAnswer == nil {
+			return fmt.Errorf("%w: missing general answer", ErrSemanticValidation)
+		}
+		if !allowedGeneralTopics[result.GeneralAnswer.Topic] {
+			return fmt.Errorf("%w: unsupported general answer topic %q", ErrSemanticValidation, result.GeneralAnswer.Topic)
+		}
+		if !generalDomainSignal(evidence.Question, result.GeneralAnswer.Topic, evidence.CurrentSnapshot) {
+			return fmt.Errorf("%w: general answer is outside OS monitoring domain", ErrSemanticValidation)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: unknown response type", ErrSemanticValidation)
+	}
+}
+
+var allowedGeneralTopics = map[string]bool{
+	"os_monitoring": true,
+	"cpu":           true,
+	"memory":        true,
+	"gpu":           true,
+	"disk":          true,
+	"network":       true,
+	"processes":     true,
+	"drivers":       true,
+}
+
+func generalDomainSignal(question, topic string, snapshot collector.SystemSnapshot) bool {
+	text := strings.ToLower(question)
+	if strings.Contains(text, strings.ToLower(topic)) {
+		return true
+	}
+	terms := []string{"ос", "система", "мониторинг", "нагруз", "ядр", "процесс", "cpu", "процессор", "gpu", "видеокарт", "cuda", "nvidia", "памят", "memory", "ram", "swap", "диск", "disk", "файл", "network", "сеть", "интерфейс", "драйвер", "driver", "температур"}
+	for _, term := range terms {
+		if strings.Contains(text, term) {
+			return true
+		}
+	}
+	// Follow-up questions may refer to the hardware from the current snapshot
+	// indirectly ("что о ней известно", "характеристики и год выхода").
+	// Allow those references only when the referenced hardware section exists.
+	if topic == "gpu" && len(snapshot.GPU) > 0 {
+		for _, term := range []string{"о ней", "о нём", "характеристик", "модел", "год выхода", "год выпуска", "видеокарт"} {
+			if strings.Contains(text, term) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func samePID(a, b *int32) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 var knownMissingSections = map[string]struct{}{
 	"cpu":          {},
 	"cpu_per_core": {},

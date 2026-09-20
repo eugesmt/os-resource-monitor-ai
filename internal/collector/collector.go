@@ -3,7 +3,6 @@ package collector
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"sort"
@@ -17,6 +16,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/shirou/gopsutil/v3/net"
 	"github.com/shirou/gopsutil/v3/process"
+	"uuid"
 )
 
 const defaultMaxProcesses = 100
@@ -84,7 +84,7 @@ func (c *Collector) collectWithProbes(p Probes) (SystemSnapshot, CollectionDiagn
 	defer c.collectMu.Unlock()
 
 	now := time.Now()
-	s := SystemSnapshot{SnapshotID: fmt.Sprintf("snap-%d", now.UnixNano()), CapturedAt: now, Timestamp: now, MissingData: make([]string, 0)}
+	s := SystemSnapshot{SnapshotID: "snap-" + uuid.NewV4().String(), CapturedAt: now, Timestamp: now, MissingData: make([]string, 0)}
 	diagnostics := CollectionDiagnostics{Errors: make(map[string]string)}
 
 	var (

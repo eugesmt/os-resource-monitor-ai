@@ -30,13 +30,20 @@ func main() {
 		logger.Warn("failed to load .env", "error", err)
 	}
 	cfg := config.Load()
+	conversationStore, err := storage.NewConversationStore(cfg.ContextDBPath)
+	if err != nil {
+		logger.Error("conversation store unavailable", "error", err, "path", cfg.ContextDBPath)
+		os.Exit(1)
+	}
+	defer conversationStore.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	c := collector.New(cfg.MaxProcesses, logger)
 	runtime := server.NewRuntime(c, storage.NewRingBuffer(cfg.HistorySize), logger)
+	runtime.SetHistoryStore(conversationStore)
 	if cfg.AIAPIKey != "" {
-		agent := ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), ai.DefaultSystemPrompt)
+		agent := ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), ai.DefaultSystemPrompt, conversationStore, cfg.AIContextTokenBudget)
 		agent.SetLogger(logger)
 		runtime.SetAIAgent(agent)
 	}
