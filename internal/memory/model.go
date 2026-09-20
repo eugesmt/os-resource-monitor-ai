@@ -5,6 +5,7 @@ package memory
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,81 @@ type Record struct {
 	Kind      string    `json:"kind"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+const (
+	maxProfileFieldLength = 1000
+	maxProfileConstraints = 12
+)
+
+// Profile contains explicit user preferences used to tailor assistant replies.
+// It is intentionally separate from conversational memory: a profile is
+// supplied by the user and is never inferred from chat messages.
+type Profile struct {
+	UserID      string   `json:"user_id"`
+	Style       string   `json:"style"`
+	Format      string   `json:"format"`
+	Constraints []string `json:"constraints"`
+}
+
+func (p Profile) Empty() bool {
+	return strings.TrimSpace(p.UserID) == "" && strings.TrimSpace(p.Style) == "" && strings.TrimSpace(p.Format) == "" && len(p.Constraints) == 0
+}
+
+func (p Profile) Validate() error {
+	if strings.TrimSpace(p.UserID) == "" {
+		return errors.New("profile user_id is empty")
+	}
+	if len([]rune(p.UserID)) > maxProfileFieldLength {
+		return errors.New("profile user_id is too long")
+	}
+	for name, value := range map[string]string{"style": p.Style, "format": p.Format} {
+		if len([]rune(value)) > maxProfileFieldLength {
+			return fmt.Errorf("profile %s is too long", name)
+		}
+	}
+	if len(p.Constraints) > maxProfileConstraints {
+		return errors.New("profile has too many constraints")
+	}
+	for _, constraint := range p.Constraints {
+		if strings.TrimSpace(constraint) == "" {
+			return errors.New("profile constraint is empty")
+		}
+		if len([]rune(constraint)) > maxProfileFieldLength {
+			return errors.New("profile constraint is too long")
+		}
+	}
+	return nil
+}
+
+// Render makes the profile visible to the agent as preferences, not as
+// conversation data. The explicit boundary helps keep profile text distinct
+// from snapshots and historical messages.
+func (p Profile) Render() string {
+	if p.Empty() {
+		return ""
+	}
+	var builder strings.Builder
+	builder.WriteString("[USER_PROFILE (PREFERENCES ONLY)]\n")
+	builder.WriteString("user_id: ")
+	builder.WriteString(p.UserID)
+	builder.WriteByte('\n')
+	if strings.TrimSpace(p.Style) != "" {
+		builder.WriteString("style: ")
+		builder.WriteString(p.Style)
+		builder.WriteByte('\n')
+	}
+	if strings.TrimSpace(p.Format) != "" {
+		builder.WriteString("format: ")
+		builder.WriteString(p.Format)
+		builder.WriteByte('\n')
+	}
+	for _, constraint := range p.Constraints {
+		builder.WriteString("constraint: ")
+		builder.WriteString(constraint)
+		builder.WriteByte('\n')
+	}
+	return builder.String()
 }
 
 type MemorySelection struct {
@@ -100,9 +176,38 @@ type Model struct {
 	shortTerm layerStore
 	working   layerStore
 	longTerm  layerStore
+	profileMu sync.RWMutex
+	profile   Profile
 }
 
 func NewModel() *Model { return &Model{} }
+
+// SetProfile replaces the explicit user profile used for future requests.
+func (m *Model) SetProfile(profile Profile) error {
+	if err := profile.Validate(); err != nil {
+		return err
+	}
+	profile.UserID = strings.TrimSpace(profile.UserID)
+	profile.Style = strings.TrimSpace(profile.Style)
+	profile.Format = strings.TrimSpace(profile.Format)
+	profile.Constraints = append([]string(nil), profile.Constraints...)
+	for i := range profile.Constraints {
+		profile.Constraints[i] = strings.TrimSpace(profile.Constraints[i])
+	}
+	m.profileMu.Lock()
+	m.profile = profile
+	m.profileMu.Unlock()
+	return nil
+}
+
+// Profile returns a defensive copy of the current user profile.
+func (m *Model) Profile() Profile {
+	m.profileMu.RLock()
+	defer m.profileMu.RUnlock()
+	profile := m.profile
+	profile.Constraints = append([]string(nil), m.profile.Constraints...)
+	return profile
+}
 
 func newRecord(layer Layer, scope, kind, content string) (Record, error) {
 	if strings.TrimSpace(scope) == "" {

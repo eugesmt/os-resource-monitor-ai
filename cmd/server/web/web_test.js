@@ -2,6 +2,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
 const source = fs.readFileSync(`${__dirname}/app.js`, 'utf8');
+assert.match(source, /profileForm/);
+assert.match(source, /\/api\/ai\/profile/);
+assert.match(source, /\/api\/ai\/profiles/);
+assert.match(source, /method: 'PUT'/);
+assert.match(source, /profileMenuButton/);
+assert.match(source, /addProfileButton/);
+assert.doesNotMatch(source, /localStorage/);
 const start = source.indexOf('function formatAIAnswer');
 const end = source.indexOf("$('askForm').addEventListener", start);
 assert.ok(start >= 0 && end > start, 'formatAIAnswer was not found');

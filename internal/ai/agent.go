@@ -223,6 +223,24 @@ func (a *Agent) SetMemoryModel(model *memory.Model) {
 
 func (a *Agent) MemoryModel() *memory.Model { return a.memory }
 
+// SetConversation switches the active user's conversation. Calls are
+// serialized with turns so a profile switch cannot change an in-flight ask.
+func (a *Agent) SetConversation(conversationID string) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		conversationID = "default"
+	}
+	a.turnMu.Lock()
+	a.conversation = conversationID
+	a.turnMu.Unlock()
+}
+
+func (a *Agent) ConversationID() string {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	return a.conversation
+}
+
 func (a *Agent) SetLogger(logger *slog.Logger) {
 	if logger != nil {
 		a.log = logger
@@ -301,7 +319,15 @@ func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID strin
 		beforeEventID = currentUserEventID
 	}
 	if a.memory != nil {
-		memoryContext := a.memory.BuildContext(memory.MemorySelection{TaskID: a.conversation, LongTermScope: "default", IncludeWorking: true, IncludeLong: true}).Render()
+		profile := a.memory.Profile()
+		if profileContext := profile.Render(); profileContext != "" {
+			contextText += "\n\nUSER_PERSONALIZATION (PREFERENCES DATA):\n" + profileContext
+		}
+		longTermScope := a.conversation
+		if longTermScope == "" {
+			longTermScope = "default"
+		}
+		memoryContext := a.memory.BuildContext(memory.MemorySelection{TaskID: a.conversation, LongTermScope: longTermScope, IncludeWorking: true, IncludeLong: true}).Render()
 		if memoryContext != "" {
 			contextText += "\n\nEXPLICIT_MEMORY_LAYERS (DATA ONLY):\n" + memoryContext
 		}

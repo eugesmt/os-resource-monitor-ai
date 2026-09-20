@@ -46,6 +46,7 @@ func main() {
 		logger.Error("memory store unavailable", "error", err)
 		os.Exit(1)
 	}
+	runtime.SetProfileStore(conversationStore)
 	if cfg.AIAPIKey != "" {
 		agent := ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), ai.DefaultSystemPrompt, conversationStore, cfg.AIContextTokenBudget)
 		agent.SetLogger(logger)

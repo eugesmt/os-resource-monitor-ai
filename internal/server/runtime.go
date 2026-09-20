@@ -33,6 +33,7 @@ type Runtime struct {
 	history     ai.HistoryStore
 	memory      *memory.Model
 	memoryStore memoryStore
+	profiles    profileStore
 	askMu       sync.Mutex
 
 	subscriberMu sync.Mutex
@@ -45,6 +46,11 @@ type memoryStore interface {
 	SaveMemory(context.Context, memory.Record) error
 	ListMemory(context.Context) ([]memory.Record, error)
 	DeleteMemory(context.Context, string) error
+}
+
+type profileStore interface {
+	SaveProfile(context.Context, memory.Profile) error
+	ListProfiles(context.Context) ([]memory.Profile, error)
 }
 
 // State хранит только текущее состояние мониторинга приложения.
@@ -66,11 +72,57 @@ func (s *Runtime) SetAIAgent(agent *ai.Agent) {
 	s.aiAgent = agent
 	if agent != nil {
 		agent.SetMemoryModel(s.memory)
+		agent.SetConversation(s.ConversationID())
 	}
 	s.agentMu.Unlock()
 }
 
 func (s *Runtime) MemoryModel() *memory.Model { return s.memory }
+
+func (s *Runtime) SetProfile(ctx context.Context, profile memory.Profile) error {
+	if err := profile.Validate(); err != nil {
+		return err
+	}
+	s.askMu.Lock()
+	defer s.askMu.Unlock()
+	if s.profiles != nil {
+		if err := s.profiles.SaveProfile(ctx, profile); err != nil {
+			return err
+		}
+	}
+	if err := s.memory.SetProfile(profile); err != nil {
+		return err
+	}
+	s.agentMu.RLock()
+	agent := s.aiAgent
+	s.agentMu.RUnlock()
+	if agent != nil {
+		agent.SetConversation(s.ConversationID())
+	}
+	return nil
+}
+
+func (s *Runtime) Profile() memory.Profile {
+	return s.memory.Profile()
+}
+
+func (s *Runtime) SetProfileStore(store profileStore) {
+	s.profiles = store
+}
+
+func (s *Runtime) Profiles(ctx context.Context) ([]memory.Profile, error) {
+	if s.profiles == nil {
+		return []memory.Profile{}, nil
+	}
+	return s.profiles.ListProfiles(ctx)
+}
+
+func (s *Runtime) ConversationID() string {
+	if userID := s.memory.Profile().UserID; userID != "" {
+		return "profile:" + userID
+	}
+	return storage.DefaultConversationID
+}
 
 func (s *Runtime) SetMemoryStore(ctx context.Context, store memoryStore) error {
 	s.memoryStore = store
@@ -169,7 +221,7 @@ func (s *Runtime) GetConversationHistory(ctx context.Context) ([]domain.Conversa
 	if store == nil {
 		return nil, errors.New("conversation history unavailable")
 	}
-	return store.ListEvents(ctx, storage.DefaultConversationID)
+	return store.ListEvents(ctx, s.ConversationID())
 }
 func (s *Runtime) AskAI(ctx context.Context, question string) (*domain.AnalysisResponse, error) {
 	s.askMu.Lock()

@@ -87,3 +87,40 @@ func TestMemoryRejectsEmptyFields(t *testing.T) {
 		t.Fatal("empty content accepted")
 	}
 }
+
+func TestProfileIsValidatedRenderedAndCopied(t *testing.T) {
+	model := NewModel()
+	profile := Profile{UserID: "user-1", Style: "concise", Format: "bullet list", Constraints: []string{"answer in Russian", "do not invent metrics"}}
+	if err := model.SetProfile(profile); err != nil {
+		t.Fatalf("SetProfile() error = %v", err)
+	}
+	profile.Constraints[0] = "mutated"
+
+	got := model.Profile()
+	if got.Constraints[0] != "answer in Russian" {
+		t.Fatalf("stored profile was changed through input slice: %#v", got)
+	}
+	got.Constraints[0] = "mutated again"
+	if model.Profile().Constraints[0] != "answer in Russian" {
+		t.Fatal("Profile() did not return a defensive copy")
+	}
+	rendered := model.Profile().Render()
+	for _, want := range []string{"[USER_PROFILE (PREFERENCES ONLY)]", "style: concise", "format: bullet list", "constraint: answer in Russian", "constraint: do not invent metrics"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered profile missing %q: %q", want, rendered)
+		}
+	}
+}
+
+func TestProfileRejectsInvalidValues(t *testing.T) {
+	cases := []Profile{
+		{Style: "concise"},
+		{UserID: "user", Constraints: []string{" "}},
+		{UserID: "user", Constraints: make([]string, maxProfileConstraints+1)},
+	}
+	for i, profile := range cases {
+		if err := profile.Validate(); err == nil {
+			t.Errorf("case %d: Validate() error = nil", i)
+		}
+	}
+}

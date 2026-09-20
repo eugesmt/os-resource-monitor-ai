@@ -14,7 +14,19 @@
         <div class="brand">Task Manager <span>AI</span></div>
         <div class="subtitle">Локальный мониторинг системы и AI-анализ</div>
       </div>
-      <div id="status" class="status"><span class="status-dot pending"></span><span>Подключение…</span></div>
+      <div class="topbar-actions">
+        <div class="profile-menu">
+          <button id="profileMenuButton" class="profile-menu-button" type="button" aria-expanded="false" aria-controls="profileMenu">
+            <span class="profile-icon" aria-hidden="true">◉</span><span>Профиль</span>
+          </button>
+          <div id="profileMenu" class="profile-menu-popover" hidden>
+            <div class="profile-menu-title">Выберите профиль</div>
+            <div id="profileList" class="profile-list"></div>
+            <button id="addProfileButton" class="profile-add-button" type="button">＋ Добавить профиль</button>
+          </div>
+        </div>
+        <div id="status" class="status"><span class="status-dot pending"></span><span>Подключение…</span></div>
+      </div>
     </header>
 
     <section class="metrics-grid" aria-label="Основные показатели">
@@ -151,6 +163,26 @@
       <div id="memoryError" class="error" role="alert"></div>
     </section>
   </main>
+  <dialog id="profileDialog" class="profile-dialog">
+    <div class="panel-head">
+      <div>
+        <h2>Профиль ассистента</h2>
+        <div class="panel-hint">Предпочтения учитываются в каждом запросе</div>
+      </div>
+      <button id="profileCloseButton" class="profile-close-button" type="button" aria-label="Закрыть">×</button>
+    </div>
+    <form id="profileForm" class="profile-form">
+      <label>Имя профиля<input id="profileUserID" maxlength="1000" required placeholder="Например, user-1"></label>
+      <label>Стиль ответа<input id="profileStyle" maxlength="1000" placeholder="Например, кратко и по делу"></label>
+      <label>Формат ответа<input id="profileFormat" maxlength="1000" placeholder="Например, списки и примеры"></label>
+      <label class="profile-wide">Ограничения<input id="profileConstraints" maxlength="5000" placeholder="По одному ограничению на строку"></label>
+      <div class="profile-actions">
+        <button id="profileSaveBtn" type="submit">Сохранить профиль</button>
+        <span id="profileStatus" class="panel-hint" role="status"></span>
+      </div>
+    </form>
+    <div id="profileError" class="error" role="alert"></div>
+  </dialog>
   <script src="/app.js"></script>
 </body>
 </html>

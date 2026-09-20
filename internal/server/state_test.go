@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,12 +15,35 @@ import (
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/memory"
 	"taskmanager-ai/internal/storage"
 )
 
 type historyStub struct {
 	items []domain.ConversationEvent
 	err   error
+}
+
+type profileStoreStub struct {
+	profiles map[string]memory.Profile
+}
+
+func (s *profileStoreStub) SaveProfile(_ context.Context, profile memory.Profile) error {
+	if s.profiles == nil {
+		s.profiles = make(map[string]memory.Profile)
+	}
+	profile.Constraints = append([]string(nil), profile.Constraints...)
+	s.profiles[profile.UserID] = profile
+	return nil
+}
+
+func (s *profileStoreStub) ListProfiles(context.Context) ([]memory.Profile, error) {
+	profiles := make([]memory.Profile, 0, len(s.profiles))
+	for _, profile := range s.profiles {
+		profile.Constraints = append([]string(nil), profile.Constraints...)
+		profiles = append(profiles, profile)
+	}
+	return profiles, nil
 }
 
 func (s *historyStub) AppendUser(context.Context, string, string, string, string) (domain.ConversationEvent, error) {
@@ -118,6 +142,65 @@ func TestConversationHistoryEndpointHidesStorageError(t *testing.T) {
 	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/ai/history", nil))
 	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "conversation history temporarily unavailable") || strings.Contains(recorder.Body.String(), "database path") {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestProfileEndpointStoresAndReturnsPreferences(t *testing.T) {
+	runtime := NewRuntime(nil, storage.NewRingBuffer(1), nil)
+	runtime.SetProfileStore(&profileStoreStub{})
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, runtime, fstest.MapFS{"index.html": {Data: []byte("ok")}})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/ai/profile", bytes.NewBufferString(`{"user_id":"user-1","style":"concise","format":"bullets","constraints":["answer in Russian"]}`))
+	request.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("PUT status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/ai/profile", nil))
+	var profile map[string]any
+	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &profile) != nil {
+		t.Fatalf("GET status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if profile["user_id"] != "user-1" || profile["style"] != "concise" || profile["format"] != "bullets" {
+		t.Fatalf("profile = %#v", profile)
+	}
+
+	recorder = httptest.NewRecorder()
+	memoryRequest := httptest.NewRequest(http.MethodPost, "/api/ai/memory", bytes.NewBufferString(`{"layer":"long_term","scope":"other-user","kind":"preference","content":"private"}`))
+	memoryRequest.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(recorder, memoryRequest)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("memory POST status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var record struct {
+		Scope string `json:"scope"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &record); err != nil || record.Scope != "profile:user-1" {
+		t.Fatalf("memory scope = %#v, err=%v", record, err)
+	}
+
+	recorder = httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/ai/profiles", nil))
+	var profiles []memory.Profile
+	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &profiles) != nil || len(profiles) != 1 || profiles[0].UserID != "user-1" {
+		t.Fatalf("profiles response status=%d body=%s profiles=%#v", recorder.Code, recorder.Body.String(), profiles)
+	}
+}
+
+func TestRuntimeProfileSelectsIsolatedConversation(t *testing.T) {
+	runtime := NewRuntime(nil, storage.NewRingBuffer(1), nil)
+	if got := runtime.ConversationID(); got != storage.DefaultConversationID {
+		t.Fatalf("default conversation ID = %q", got)
+	}
+	if err := runtime.SetProfile(context.Background(), memory.Profile{UserID: "profile-user"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtime.ConversationID(); got != "profile:profile-user" {
+		t.Fatalf("profile conversation ID = %q, want profile:profile-user", got)
 	}
 }
 

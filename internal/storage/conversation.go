@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -68,6 +69,7 @@ func (s *ConversationStore) verify(ctx context.Context) error {
 		{table: "conversations", columns: []string{"id", "created_at"}},
 		{table: "conversation_events", columns: []string{"id", "conversation_id", "turn_id", "role", "content", "snapshot_id", "created_at"}},
 		{table: "memory_records", columns: []string{"id", "layer", "scope", "kind", "content", "created_at"}},
+		{table: "profiles", columns: []string{"user_id", "style", "format", "constraints_json"}},
 	}
 	for _, expected := range wantColumns {
 		table, columns := expected.table, expected.columns
@@ -131,6 +133,40 @@ func (s *ConversationStore) DeleteMemory(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *ConversationStore) SaveProfile(ctx context.Context, profile memory.Profile) error {
+	constraints, err := json.Marshal(profile.Constraints)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO profiles (user_id, style, format, constraints_json)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET style=excluded.style, format=excluded.format, constraints_json=excluded.constraints_json
+	`, profile.UserID, profile.Style, profile.Format, string(constraints))
+	return err
+}
+
+func (s *ConversationStore) ListProfiles(ctx context.Context) ([]memory.Profile, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT user_id, style, format, constraints_json FROM profiles ORDER BY user_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	profiles := make([]memory.Profile, 0)
+	for rows.Next() {
+		var profile memory.Profile
+		var constraints string
+		if err := rows.Scan(&profile.UserID, &profile.Style, &profile.Format, &constraints); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(constraints), &profile.Constraints); err != nil {
+			return nil, fmt.Errorf("decode profile %q constraints: %w", profile.UserID, err)
+		}
+		profiles = append(profiles, profile)
+	}
+	return profiles, rows.Err()
+}
+
 func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
 	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
 	if err != nil {
@@ -185,6 +221,9 @@ func (s *ConversationStore) AppendAssistant(ctx context.Context, conversationID,
 func (s *ConversationStore) append(ctx context.Context, conversationID, turnID string, role domain.EventRole, content, snapshotID string) (domain.ConversationEvent, error) {
 	if role != domain.EventRoleUser && role != domain.EventRoleAssistant {
 		return domain.ConversationEvent{}, ErrInvalidEventRole
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO conversations (id) VALUES (?)`, conversationID); err != nil {
+		return domain.ConversationEvent{}, err
 	}
 	event, err := insertEvent(ctx, s.db, conversationID, turnID, role, content, snapshotID)
 	return event, err

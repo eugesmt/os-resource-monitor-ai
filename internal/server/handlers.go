@@ -18,7 +18,6 @@ import (
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
 	"taskmanager-ai/internal/memory"
-	"taskmanager-ai/internal/storage"
 )
 
 type apiError struct {
@@ -44,6 +43,12 @@ type memoryRequest struct {
 }
 type memoryResponse struct {
 	Context memory.Context `json:"context"`
+}
+type profileRequest struct {
+	UserID      string   `json:"user_id"`
+	Style       string   `json:"style"`
+	Format      string   `json:"format"`
+	Constraints []string `json:"constraints"`
 }
 
 func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
@@ -125,10 +130,50 @@ func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 		}
 		writeJSON(w, http.StatusOK, conversationHistoryResponse{Items: items})
 	})
+	mux.HandleFunc("/api/ai/profile", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, state.Profile())
+		case http.MethodPut:
+			defer r.Body.Close()
+			var req profileRequest
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+				writeAPIError(w, http.StatusBadRequest, errors.New("invalid JSON body"))
+				return
+			}
+			profile := memory.Profile{UserID: req.UserID, Style: req.Style, Format: req.Format, Constraints: req.Constraints}
+			if err := profile.Validate(); err != nil {
+				writeAPIError(w, http.StatusBadRequest, err)
+				return
+			}
+			if err := state.SetProfile(r.Context(), profile); err != nil {
+				state.log.Error("profile storage failed", "error", err)
+				writeAPIError(w, http.StatusServiceUnavailable, errors.New("profile storage unavailable"))
+				return
+			}
+			writeJSON(w, http.StatusOK, state.Profile())
+		default:
+			methodNotAllowed(w)
+		}
+	})
+	mux.HandleFunc("/api/ai/profiles", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		profiles, err := state.Profiles(r.Context())
+		if err != nil {
+			state.log.Error("profiles list failed", "error", err)
+			writeAPIError(w, http.StatusServiceUnavailable, errors.New("profiles temporarily unavailable"))
+			return
+		}
+		writeJSON(w, http.StatusOK, profiles)
+	})
 	mux.HandleFunc("/api/ai/memory", func(w http.ResponseWriter, r *http.Request) {
 		model := state.MemoryModel()
 		if r.Method == http.MethodGet {
-			selected := model.BuildContext(memory.MemorySelection{ConversationID: storage.DefaultConversationID, TaskID: storage.DefaultConversationID, LongTermScope: "default", IncludeShort: true, IncludeWorking: true, IncludeLong: true})
+			conversationID := state.ConversationID()
+			selected := model.BuildContext(memory.MemorySelection{ConversationID: conversationID, TaskID: conversationID, LongTermScope: conversationID, IncludeShort: true, IncludeWorking: true, IncludeLong: true})
 			if events, err := state.GetConversationHistory(r.Context()); err == nil {
 				selected.ShortTerm = make([]memory.Record, 0, len(events))
 				for _, event := range events {
@@ -154,11 +199,11 @@ func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 		)
 		switch req.Layer {
 		case memory.ShortTerm:
-			record, err = model.RememberShortTerm(req.Scope, req.Kind, req.Content)
+			record, err = model.RememberShortTerm(state.ConversationID(), req.Kind, req.Content)
 		case memory.Working:
-			record, err = model.SetWorking(req.Scope, req.Kind, req.Content)
+			record, err = model.SetWorking(state.ConversationID(), req.Kind, req.Content)
 		case memory.LongTerm:
-			record, err = model.RememberLongTerm(req.Scope, req.Kind, req.Content)
+			record, err = model.RememberLongTerm(state.ConversationID(), req.Kind, req.Content)
 		default:
 			err = errors.New("invalid memory layer")
 		}

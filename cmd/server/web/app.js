@@ -2,6 +2,7 @@ const $ = (id) => document.getElementById(id);
 let history = [];
 let aiBusy = false;
 let events = null;
+let profileLibrary = {};
 
 const COLORS = { grid: '#24303c', label: '#738095', cpu: '#79a9ec', mem: '#8fd1b0' };
 
@@ -439,6 +440,146 @@ $('question').addEventListener('keydown', (event) => {
   }
 });
 
+function fillProfile(profile) {
+  $('profileUserID').value = profile?.user_id || '';
+  $('profileStyle').value = profile?.style || '';
+  $('profileFormat').value = profile?.format || '';
+  $('profileConstraints').value = Array.isArray(profile?.constraints) ? profile.constraints.join('\n') : '';
+}
+
+function rememberProfile(profile) {
+  if (!profile?.user_id) return;
+  profileLibrary[profile.user_id] = {
+    user_id: profile.user_id,
+    style: profile.style || '',
+    format: profile.format || '',
+    constraints: Array.isArray(profile.constraints) ? profile.constraints : [],
+  };
+}
+
+function renderProfileList(activeID = $('profileUserID')?.value.trim()) {
+  const list = $('profileList');
+  if (!list) return;
+  list.replaceChildren();
+  Object.values(profileLibrary).sort((left, right) => left.user_id.localeCompare(right.user_id)).forEach((profile) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = profile.user_id;
+    button.classList.toggle('active', profile.user_id === activeID);
+    button.dataset.profileId = profile.user_id;
+    list.appendChild(button);
+  });
+}
+
+function closeProfileMenu() {
+  $('profileMenu').hidden = true;
+  $('profileMenuButton').setAttribute('aria-expanded', 'false');
+}
+
+function openProfileEditor() {
+  const dialog = $('profileDialog');
+  if (dialog && !dialog.open) dialog.showModal();
+}
+
+async function activateProfile(profile) {
+  const response = await fetch('/api/ai/profile', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(profile),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось выбрать профиль');
+  fillProfile(payload);
+  rememberProfile(payload);
+  renderProfileList(payload.user_id);
+  $('profileStatus').textContent = `Активен: ${payload.user_id}`;
+}
+
+async function loadProfile() {
+  const profilesResponse = await fetch('/api/ai/profiles', { cache: 'no-store' });
+  const profilesPayload = await profilesResponse.json();
+  if (!profilesResponse.ok) throw new Error(profilesPayload.error || 'Не удалось загрузить профили');
+  profileLibrary = Object.fromEntries((Array.isArray(profilesPayload) ? profilesPayload : []).map((profile) => [profile.user_id, profile]));
+  renderProfileList();
+
+  const response = await fetch('/api/ai/profile', { cache: 'no-store' });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось загрузить профиль');
+  if (!payload.user_id) {
+    const firstProfile = Object.values(profileLibrary)[0];
+    if (firstProfile) {
+      await activateProfile(firstProfile);
+      return;
+    }
+  }
+  fillProfile(payload);
+  rememberProfile(payload);
+  renderProfileList(payload.user_id);
+}
+
+if ($('profileForm')) {
+  renderProfileList();
+  $('profileMenuButton').addEventListener('click', () => {
+    const menu = $('profileMenu');
+    menu.hidden = !menu.hidden;
+    $('profileMenuButton').setAttribute('aria-expanded', String(!menu.hidden));
+  });
+  $('profileList').addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-profile-id]');
+    if (!button) return;
+    $('profileError').textContent = '';
+    try {
+      await activateProfile(profileLibrary[button.dataset.profileId]);
+      await restoreConversation();
+      await loadMemory();
+      closeProfileMenu();
+      openProfileEditor();
+    } catch (error) {
+      $('profileError').textContent = error instanceof Error ? error.message : 'Ошибка выбора профиля';
+    }
+  });
+  $('addProfileButton').addEventListener('click', () => {
+    const name = window.prompt('Введите имя нового профиля');
+    if (!name || !name.trim()) return;
+    const profile = { user_id: name.trim(), style: '', format: '', constraints: [] };
+    rememberProfile(profile);
+    fillProfile(profile);
+    renderProfileList(profile.user_id);
+    closeProfileMenu();
+    $('profileStatus').textContent = 'Заполните данные и сохраните профиль';
+    openProfileEditor();
+    $('profileStyle').focus();
+  });
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest('.profile-menu')) closeProfileMenu();
+  });
+  $('profileCloseButton').addEventListener('click', () => $('profileDialog').close());
+  $('profileForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = $('profileSaveBtn');
+    button.disabled = true;
+    $('profileError').textContent = '';
+    $('profileStatus').textContent = '';
+    try {
+      const constraints = $('profileConstraints').value.split('\n').map((item) => item.trim()).filter(Boolean);
+      await activateProfile({
+        user_id: $('profileUserID').value.trim(),
+        style: $('profileStyle').value.trim(),
+        format: $('profileFormat').value.trim(),
+        constraints,
+      });
+      await restoreConversation();
+      await loadMemory();
+      $('profileStatus').textContent = 'Профиль сохранён';
+      $('profileDialog').close();
+    } catch (error) {
+      $('profileError').textContent = error instanceof Error ? error.message : 'Ошибка профиля';
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
 function renderMemory(context) {
   const displayContent = (item) => {
     if (item.kind !== 'assistant') return item.content;
@@ -542,6 +683,7 @@ window.addEventListener('resize', () => drawChart(history));
   setStatus('pending', 'Подключение…');
   try {
     await loadInitialState();
+    await loadProfile();
     await restoreConversation();
     await loadMemory();
   } catch {

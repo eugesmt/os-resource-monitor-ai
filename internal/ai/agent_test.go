@@ -16,6 +16,7 @@ import (
 
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/memory"
 )
 
 type fakeCompletion struct {
@@ -154,6 +155,69 @@ func TestAgentAskValidatesAndComposesPrompt(t *testing.T) {
 	}
 	if strings.Contains(fake.userContent, "contextTextMock") {
 		t.Fatal("mock context leaked")
+	}
+}
+
+func TestAgentIncludesCurrentUserProfileOnEveryRequest(t *testing.T) {
+	completion := &fakeCompletion{answer: validAgentAnswer}
+	agent := newAgent(completion, "test system prompt", &recordingHistory{})
+	if err := agent.MemoryModel().SetProfile(memory.Profile{UserID: "user-ru", Style: "concise", Format: "short bullets", Constraints: []string{"answer in Russian"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.ask(context.Background(), "first question", "runtime context", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"USER_PERSONALIZATION", "user_id: user-ru", "style: concise", "format: short bullets", "constraint: answer in Russian"} {
+		if !strings.Contains(completion.userContent, want) {
+			t.Fatalf("first request missing %q: %q", want, completion.userContent)
+		}
+	}
+
+	if err := agent.MemoryModel().SetProfile(memory.Profile{UserID: "user-en", Style: "detailed", Format: "numbered steps", Constraints: []string{"answer in English"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.ask(context.Background(), "second question", "runtime context", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"user_id: user-en", "style: detailed", "format: numbered steps", "constraint: answer in English"} {
+		if !strings.Contains(completion.userContent, want) {
+			t.Fatalf("second request missing %q: %q", want, completion.userContent)
+		}
+	}
+	if strings.Contains(completion.userContent, "user-ru") || strings.Contains(completion.userContent, "answer in Russian") {
+		t.Fatalf("previous profile leaked into second request: %q", completion.userContent)
+	}
+}
+
+func TestAgentIsolatesConversationAndLongTermMemoryByProfile(t *testing.T) {
+	history := &recordingHistory{}
+	completion := &fakeCompletion{answer: validAgentAnswer}
+	agent := newAgent(completion, "test system prompt", history)
+	if err := agent.MemoryModel().SetProfile(memory.Profile{UserID: "user-1", Style: "concise"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.MemoryModel().RememberLongTerm("user-1", "preference", "only user one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.MemoryModel().RememberLongTerm("default", "preference", "default user only"); err != nil {
+		t.Fatal(err)
+	}
+	agent.SetConversation("user-1")
+	if _, err := agent.AskWithSnapshot(context.Background(), "question", freshSnapshot("profile-snapshot")); err != nil {
+		t.Fatal(err)
+	}
+	if agent.ConversationID() != "user-1" {
+		t.Fatalf("conversation ID = %q, want user-1", agent.ConversationID())
+	}
+	events, err := history.ListEvents(context.Background(), "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].ConversationID != "user-1" || events[1].ConversationID != "user-1" {
+		t.Fatalf("profile events = %#v", events)
+	}
+	if !strings.Contains(completion.userContent, "only user one") || strings.Contains(completion.userContent, "default user only") {
+		t.Fatalf("profile memory crossed scopes: %q", completion.userContent)
 	}
 }
 

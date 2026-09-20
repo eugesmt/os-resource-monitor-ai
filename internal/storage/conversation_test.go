@@ -51,6 +51,20 @@ func migratedConversationDB(t *testing.T) string {
 		_ = db.Close()
 		t.Fatalf("apply memory migration: %v", err)
 	}
+	profilesMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920220000_profiles.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read profiles migration: %v", err)
+	}
+	profilesUp, _, ok := strings.Cut(string(profilesMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("profiles migration has no Down marker")
+	}
+	if _, err := db.Exec(profilesUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply profiles migration: %v", err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close migration database: %v", err)
 	}
@@ -134,6 +148,30 @@ func TestConversationStorePersistsSeparateMemoryLayers(t *testing.T) {
 	}
 }
 
+func TestConversationStorePersistsProfiles(t *testing.T) {
+	store, path := openConversationTestStore(t)
+	ctx := context.Background()
+	want := memory.Profile{UserID: "user-1", Style: "concise", Format: "bullets", Constraints: []string{"answer in Russian", "do not invent metrics"}}
+	if err := store.SaveProfile(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewConversationStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	profiles, err := reopened.ListProfiles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 1 || !reflect.DeepEqual(profiles[0], want) {
+		t.Fatalf("profiles = %#v, want %#v", profiles, []memory.Profile{want})
+	}
+}
+
 func openConversationTestStore(t *testing.T) (*ConversationStore, string) {
 	t.Helper()
 	path := migratedConversationDB(t)
@@ -198,8 +236,13 @@ func TestConversationStoreAppendListConstraintsAndReopen(t *testing.T) {
 	if _, err := store.AppendUser(ctx, DefaultConversationID, "turn-empty", "", "snap"); err == nil {
 		t.Fatal("empty content unexpectedly succeeded")
 	}
-	if _, err := store.AppendUser(ctx, "missing", "turn-fk", "content", "snap"); err == nil {
-		t.Fatal("foreign-key violation unexpectedly succeeded")
+	profileUser, err := store.AppendUser(ctx, "profile-user", "turn-profile", "content", "snap")
+	if err != nil {
+		t.Fatalf("new profile conversation was not created: %v", err)
+	}
+	profileEvents, err := store.ListEvents(ctx, "profile-user")
+	if err != nil || len(profileEvents) != 1 || profileEvents[0].ID != profileUser.ID {
+		t.Fatalf("profile conversation events = %#v, %v", profileEvents, err)
 	}
 
 	want, err := store.ListEvents(ctx, DefaultConversationID)
