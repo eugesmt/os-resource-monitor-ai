@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/memory"
+	"taskmanager-ai/internal/storage"
 )
 
 type apiError struct {
@@ -32,6 +35,15 @@ type historyResponse struct {
 }
 type conversationHistoryResponse struct {
 	Items []domain.ConversationEvent `json:"items"`
+}
+type memoryRequest struct {
+	Layer   memory.Layer `json:"layer"`
+	Scope   string       `json:"scope"`
+	Kind    string       `json:"kind"`
+	Content string       `json:"content"`
+}
+type memoryResponse struct {
+	Context memory.Context `json:"context"`
 }
 
 func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
@@ -112,6 +124,70 @@ func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 			return
 		}
 		writeJSON(w, http.StatusOK, conversationHistoryResponse{Items: items})
+	})
+	mux.HandleFunc("/api/ai/memory", func(w http.ResponseWriter, r *http.Request) {
+		model := state.MemoryModel()
+		if r.Method == http.MethodGet {
+			selected := model.BuildContext(memory.MemorySelection{ConversationID: storage.DefaultConversationID, TaskID: storage.DefaultConversationID, LongTermScope: "default", IncludeShort: true, IncludeWorking: true, IncludeLong: true})
+			if events, err := state.GetConversationHistory(r.Context()); err == nil {
+				selected.ShortTerm = make([]memory.Record, 0, len(events))
+				for _, event := range events {
+					selected.ShortTerm = append(selected.ShortTerm, memory.Record{ID: fmt.Sprint(event.ID), Layer: memory.ShortTerm, Scope: event.ConversationID, Kind: string(event.Role), Content: event.Content, CreatedAt: event.CreatedAt})
+				}
+			}
+			writeJSON(w, http.StatusOK, memoryResponse{Context: selected})
+			return
+		}
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		defer r.Body.Close()
+		var req memoryRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+			writeAPIError(w, http.StatusBadRequest, errors.New("invalid JSON body"))
+			return
+		}
+		var (
+			record memory.Record
+			err    error
+		)
+		switch req.Layer {
+		case memory.ShortTerm:
+			record, err = model.RememberShortTerm(req.Scope, req.Kind, req.Content)
+		case memory.Working:
+			record, err = model.SetWorking(req.Scope, req.Kind, req.Content)
+		case memory.LongTerm:
+			record, err = model.RememberLongTerm(req.Scope, req.Kind, req.Content)
+		default:
+			err = errors.New("invalid memory layer")
+		}
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := state.SaveMemory(r.Context(), record); err != nil {
+			model.Remove(record.ID)
+			writeAPIError(w, http.StatusServiceUnavailable, errors.New("memory storage unavailable"))
+			return
+		}
+		writeJSON(w, http.StatusCreated, record)
+	})
+	mux.HandleFunc("/api/ai/memory/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			methodNotAllowed(w)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/ai/memory/")
+		if id == "" || strings.Contains(id, "/") {
+			writeAPIError(w, http.StatusBadRequest, errors.New("memory id is required"))
+			return
+		}
+		if err := state.DeleteMemory(r.Context(), id); err != nil {
+			writeAPIError(w, http.StatusServiceUnavailable, errors.New("memory storage unavailable"))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

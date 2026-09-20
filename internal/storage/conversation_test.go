@@ -9,9 +9,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/memory"
 
 	_ "modernc.org/sqlite"
 )
@@ -34,6 +36,20 @@ func migratedConversationDB(t *testing.T) string {
 	if _, err := db.Exec(up); err != nil {
 		_ = db.Close()
 		t.Fatalf("apply migration: %v", err)
+	}
+	memoryMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920200000_memory_records.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read memory migration: %v", err)
+	}
+	memoryUp, _, ok := strings.Cut(string(memoryMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("memory migration has no Down marker")
+	}
+	if _, err := db.Exec(memoryUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply memory migration: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close migration database: %v", err)
@@ -93,6 +109,28 @@ func TestConversationStoreListRecentEventsBoundedBeforeCursorAndReopen(t *testin
 	}
 	if !reflect.DeepEqual(compiledAfter, compiledBefore) {
 		t.Fatalf("compiled context changed after reopen:\nbefore=%#v\nafter=%#v", compiledBefore, compiledAfter)
+	}
+}
+
+func TestConversationStorePersistsSeparateMemoryLayers(t *testing.T) {
+	store, path := openConversationTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	record := memory.Record{ID: "memory-1", Layer: memory.LongTerm, Scope: "default", Kind: "preference", Content: "answer in Russian", CreatedAt: time.Now().UTC()}
+	if err := store.SaveMemory(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewConversationStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	items, err := reopened.ListMemory(ctx)
+	if err != nil || len(items) != 1 || items[0].Layer != memory.LongTerm || items[0].Content != record.Content {
+		t.Fatalf("memory records = %#v, err=%v", items, err)
 	}
 }
 

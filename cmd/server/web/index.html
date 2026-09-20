@@ -129,6 +129,27 @@
       </form>
       <div id="aiError" class="error" role="alert"></div>
     </section>
+
+    <section class="card panel memory-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Память агента</h2>
+          <div class="panel-hint">Три слоя выбираются явно и не смешиваются автоматически</div>
+        </div>
+      </div>
+      <form id="memoryForm" class="memory-form">
+        <input id="memoryKind" maxlength="80" placeholder="Тип, например preference" />
+        <input id="memoryContent" maxlength="1000" placeholder="Что сохранить" />
+        <button type="submit">Сохранить</button>
+      </form>
+      <div class="memory-tabs" role="tablist" aria-label="Слои памяти">
+        <button type="button" class="memory-tab active" data-memory-tab="short_term" role="tab">Краткосрочная</button>
+        <button type="button" class="memory-tab" data-memory-tab="working" role="tab">Рабочая</button>
+        <button type="button" class="memory-tab" data-memory-tab="long_term" role="tab">Долговременная</button>
+      </div>
+      <div id="memoryView" class="memory-view">Память загружается…</div>
+      <div id="memoryError" class="error" role="alert"></div>
+    </section>
   </main>
   <script src="/app.js"></script>
 </body>

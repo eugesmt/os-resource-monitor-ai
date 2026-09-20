@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/memory"
 
 	_ "modernc.org/sqlite"
 )
@@ -60,11 +61,16 @@ func (s *ConversationStore) verify(ctx context.Context) error {
 	if foreignKeys != 1 {
 		return errors.New("conversation database foreign keys are disabled")
 	}
-	wantColumns := map[string][]string{
-		"conversations":       {"id", "created_at"},
-		"conversation_events": {"id", "conversation_id", "turn_id", "role", "content", "snapshot_id", "created_at"},
+	wantColumns := []struct {
+		table   string
+		columns []string
+	}{
+		{table: "conversations", columns: []string{"id", "created_at"}},
+		{table: "conversation_events", columns: []string{"id", "conversation_id", "turn_id", "role", "content", "snapshot_id", "created_at"}},
+		{table: "memory_records", columns: []string{"id", "layer", "scope", "kind", "content", "created_at"}},
 	}
-	for table, columns := range wantColumns {
+	for _, expected := range wantColumns {
+		table, columns := expected.table, expected.columns
 		found, err := tableColumns(ctx, s.db, table)
 		if err != nil {
 			return fmt.Errorf("verify conversation schema: %w", err)
@@ -81,6 +87,46 @@ func (s *ConversationStore) verify(ctx context.Context) error {
 	}
 	if exists != 1 {
 		return errors.New("default conversation is missing; apply migrations with goose before starting")
+	}
+	return nil
+}
+
+func (s *ConversationStore) SaveMemory(ctx context.Context, record memory.Record) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO memory_records (id, layer, scope, kind, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`, record.ID, record.Layer, record.Scope, record.Kind, record.Content, record.CreatedAt.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *ConversationStore) ListMemory(ctx context.Context) ([]memory.Record, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, layer, scope, kind, content, created_at FROM memory_records ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]memory.Record, 0)
+	for rows.Next() {
+		var item memory.Record
+		var created string
+		if err := rows.Scan(&item.ID, &item.Layer, &item.Scope, &item.Kind, &item.Content, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *ConversationStore) DeleteMemory(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM memory_records WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected == 0 {
+		return errors.New("memory record not found")
 	}
 	return nil
 }

@@ -42,6 +42,10 @@ func main() {
 	c := collector.New(cfg.MaxProcesses, logger)
 	runtime := server.NewRuntime(c, storage.NewRingBuffer(cfg.HistorySize), logger)
 	runtime.SetHistoryStore(conversationStore)
+	if err := runtime.SetMemoryStore(ctx, conversationStore); err != nil {
+		logger.Error("memory store unavailable", "error", err)
+		os.Exit(1)
+	}
 	if cfg.AIAPIKey != "" {
 		agent := ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), ai.DefaultSystemPrompt, conversationStore, cfg.AIContextTokenBudget)
 		agent.SetLogger(logger)

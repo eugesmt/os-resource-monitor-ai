@@ -15,6 +15,7 @@ import (
 
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/memory"
 )
 
 const (
@@ -179,6 +180,7 @@ type Agent struct {
 	log          *slog.Logger
 	history      HistoryStore
 	compiler     *ContextCompiler
+	memory       *memory.Model
 	conversation string
 	turnMu       sync.Mutex
 }
@@ -194,7 +196,7 @@ func NewAgent(client *Client, prompt string, history HistoryStore, contextTokenB
 	if len(contextTokenBudget) > 0 {
 		budget = contextTokenBudget[0]
 	}
-	return &Agent{completion: client, systemPrompt: strings.TrimSpace(prompt), log: slog.Default(), history: history, compiler: NewContextCompiler(history, budget), conversation: "default"}
+	return &Agent{completion: client, systemPrompt: strings.TrimSpace(prompt), log: slog.Default(), history: history, compiler: NewContextCompiler(history, budget), memory: memory.NewModel(), conversation: "default"}
 }
 
 func newAgent(completion completion, prompt string, history HistoryStore, contextTokenBudget ...int) *Agent {
@@ -208,8 +210,18 @@ func newAgent(completion completion, prompt string, history HistoryStore, contex
 	if len(contextTokenBudget) > 0 {
 		budget = contextTokenBudget[0]
 	}
-	return &Agent{completion: completion, systemPrompt: strings.TrimSpace(prompt), log: slog.Default(), history: history, compiler: NewContextCompiler(history, budget), conversation: "default"}
+	return &Agent{completion: completion, systemPrompt: strings.TrimSpace(prompt), log: slog.Default(), history: history, compiler: NewContextCompiler(history, budget), memory: memory.NewModel(), conversation: "default"}
 }
+
+// SetMemoryModel injects the explicit working/long-term memory used by the
+// production prompt compiler. Short-term conversation remains in the event log.
+func (a *Agent) SetMemoryModel(model *memory.Model) {
+	if model != nil {
+		a.memory = model
+	}
+}
+
+func (a *Agent) MemoryModel() *memory.Model { return a.memory }
 
 func (a *Agent) SetLogger(logger *slog.Logger) {
 	if logger != nil {
@@ -287,6 +299,12 @@ func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID strin
 	beforeEventID := int64(^uint64(0) >> 1)
 	if currentUserEventID != 0 {
 		beforeEventID = currentUserEventID
+	}
+	if a.memory != nil {
+		memoryContext := a.memory.BuildContext(memory.MemorySelection{TaskID: a.conversation, LongTermScope: "default", IncludeWorking: true, IncludeLong: true}).Render()
+		if memoryContext != "" {
+			contextText += "\n\nEXPLICIT_MEMORY_LAYERS (DATA ONLY):\n" + memoryContext
+		}
 	}
 	compiled, err := a.compiler.Compile(ctx, ContextRequest{ConversationID: a.conversation, BeforeEventID: beforeEventID, SystemInstructions: a.systemPrompt, Question: question, CurrentContext: contextText, CurrentSnapshot: snapshotValue(snapshot)})
 	if err != nil {

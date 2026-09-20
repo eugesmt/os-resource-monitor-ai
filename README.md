@@ -16,6 +16,7 @@
 - [HTTP API и frontend](#http-api-и-frontend)
 - [Telemetry](#telemetry)
 - [Offline eval и эксперименты](#offline-eval-и-эксперименты)
+- [Учебная модель memory/state](#учебная-модель-memorystate)
 - [Тестирование и проверки](#тестирование-и-проверки)
 - [Карта файлов](#карта-файлов)
 
@@ -629,6 +630,30 @@ Manifest проверяет разные baseline/candidate versions, подде
 Offline eval не отправляет запросы в DeepSeek и не оценивает live model quality, latency, token usage или rate limits. Diagnosis cases используют искусственные snapshots, а source-aware cases — детерминированную искусственную conversation history. Eval не заменяет runtime validation.
 
 Prompt-injection fixture проверяет placement malicious strings внутри untrusted boundary и rejection forbidden claims, но не доказывает абсолютную устойчивость live LLM. Для этого нужен отдельный live-eval runner; в V1 его нет.
+
+## Учебная модель memory/state
+
+На ветке `learning/memory-state` есть явная модель памяти в `internal/memory`.
+Она не меняет контракт production `/api/ai/ask`, но добавляет отдельную SQLite
+таблицу `memory_records` для рабочих и долговременных записей.
+
+В production UI откройте панель «Память агента». Через неё можно сохранить запись
+в выбранный слой и сразу увидеть содержимое каждого слоя. Те же операции доступны
+через `GET/POST /api/ai/memory`.
+
+Модель создаёт и отдельно выбирает:
+
+- `short_term` — сообщения текущего диалога;
+- `working` — данные и решения текущей задачи;
+- `long_term` — профильные предпочтения и устойчивые знания.
+
+В UI каждый слой помечен явно. Повторное включение только `working` показывает,
+что выбор контекста управляется вызывающим кодом: записи сами не «повышаются» из
+краткосрочной памяти в долговременную. Тесты модели запускаются командой:
+
+```bash
+GOCACHE=/tmp/taskmanager-go-cache go test ./internal/memory ./internal/server ./internal/ai
+```
 
 ## Тестирование и проверки
 

@@ -13,6 +13,7 @@ import (
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/memory"
 	"taskmanager-ai/internal/storage"
 )
 
@@ -26,16 +27,24 @@ type Runtime struct {
 	buffer    *storage.RingBuffer
 	log       *slog.Logger
 
-	state   State
-	agentMu sync.RWMutex
-	aiAgent *ai.Agent
-	history ai.HistoryStore
-	askMu   sync.Mutex
+	state       State
+	agentMu     sync.RWMutex
+	aiAgent     *ai.Agent
+	history     ai.HistoryStore
+	memory      *memory.Model
+	memoryStore memoryStore
+	askMu       sync.Mutex
 
 	subscriberMu sync.Mutex
 	subscribers  map[chan collector.SystemSnapshot]struct{}
 	startMu      sync.Mutex
 	cancel       context.CancelFunc
+}
+
+type memoryStore interface {
+	SaveMemory(context.Context, memory.Record) error
+	ListMemory(context.Context) ([]memory.Record, error)
+	DeleteMemory(context.Context, string) error
 }
 
 // State хранит только текущее состояние мониторинга приложения.
@@ -49,13 +58,52 @@ func NewRuntime(c *collector.Collector, buffer *storage.RingBuffer, logger *slog
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Runtime{collector: c, buffer: buffer, log: logger, subscribers: make(map[chan collector.SystemSnapshot]struct{})}
+	return &Runtime{collector: c, buffer: buffer, log: logger, memory: memory.NewModel(), subscribers: make(map[chan collector.SystemSnapshot]struct{})}
 }
 
 func (s *Runtime) SetAIAgent(agent *ai.Agent) {
 	s.agentMu.Lock()
 	s.aiAgent = agent
+	if agent != nil {
+		agent.SetMemoryModel(s.memory)
+	}
 	s.agentMu.Unlock()
+}
+
+func (s *Runtime) MemoryModel() *memory.Model { return s.memory }
+
+func (s *Runtime) SetMemoryStore(ctx context.Context, store memoryStore) error {
+	s.memoryStore = store
+	if store == nil {
+		return nil
+	}
+	records, err := store.ListMemory(ctx)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if err := s.memory.Add(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Runtime) SaveMemory(ctx context.Context, record memory.Record) error {
+	if s.memoryStore == nil {
+		return nil
+	}
+	return s.memoryStore.SaveMemory(ctx, record)
+}
+
+func (s *Runtime) DeleteMemory(ctx context.Context, id string) error {
+	if s.memoryStore != nil {
+		if err := s.memoryStore.DeleteMemory(ctx, id); err != nil {
+			return err
+		}
+	}
+	s.memory.Remove(id)
+	return nil
 }
 
 func (s *Runtime) SetHistoryStore(store ai.HistoryStore) {

@@ -439,6 +439,103 @@ $('question').addEventListener('keydown', (event) => {
   }
 });
 
+function renderMemory(context) {
+  const displayContent = (item) => {
+    if (item.kind !== 'assistant') return item.content;
+    try {
+      const response = JSON.parse(item.content);
+      const type = response.response_type;
+      if (type === 'diagnosis') return response.diagnosis?.summary || 'Диагностический ответ';
+      if (type === 'general_answer') return response.general_answer?.answer || 'Общий ответ';
+      if (type === 'conversation_recall') return response.conversation_recall?.answer || 'Ответ по истории диалога';
+      if (type === 'metric_comparison') return response.metric_comparison?.summary || 'Сравнение метрик';
+    } catch {
+      // Keep non-JSON historical content readable.
+    }
+    return item.content;
+  };
+  window.memoryContext = context;
+  const active = document.querySelector('.memory-tab.active')?.dataset.memoryTab || 'short_term';
+  const records = Array.isArray(context[active]) ? context[active] : [];
+  const view = $('memoryView');
+  view.replaceChildren();
+  if (!records.length) {
+    view.textContent = 'Этот слой памяти пуст';
+    return;
+  }
+  records.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'memory-record';
+    const text = document.createElement('span');
+    text.textContent = `${item.kind}: ${displayContent(item)}`;
+    if (item.layer !== 'short_term') {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'memory-delete';
+      remove.textContent = 'Удалить';
+      remove.dataset.memoryId = item.id;
+      row.append(text, remove);
+    } else {
+      row.append(text);
+    }
+    view.append(row);
+  });
+}
+
+document.querySelectorAll('.memory-tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.memory-tab').forEach((item) => item.classList.toggle('active', item === tab));
+    if (window.memoryContext) renderMemory(window.memoryContext);
+  });
+});
+
+$('memoryView').addEventListener('click', async (event) => {
+  const button = event.target.closest('.memory-delete');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/ai/memory/${encodeURIComponent(button.dataset.memoryId)}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error('Не удалось удалить запись');
+    await loadMemory();
+  } catch (error) {
+    $('memoryError').textContent = error instanceof Error ? error.message : 'Ошибка удаления памяти';
+    button.disabled = false;
+  }
+});
+
+async function loadMemory() {
+  const response = await fetch('/api/ai/memory');
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось загрузить память');
+  renderMemory(payload.context);
+}
+
+if ($('memoryForm')) {
+  $('memoryForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    $('memoryError').textContent = '';
+    try {
+      const response = await fetch('/api/ai/memory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          layer: document.querySelector('.memory-tab.active')?.dataset.memoryTab || 'short_term',
+          scope: 'default',
+          kind: $('memoryKind').value.trim(),
+          content: $('memoryContent').value.trim(),
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Не удалось сохранить память');
+      $('memoryKind').value = '';
+      $('memoryContent').value = '';
+      await loadMemory();
+    } catch (error) {
+      $('memoryError').textContent = error instanceof Error ? error.message : 'Ошибка памяти';
+    }
+  });
+}
+
 window.addEventListener('resize', () => drawChart(history));
 
 (async function init() {
@@ -446,6 +543,7 @@ window.addEventListener('resize', () => drawChart(history));
   try {
     await loadInitialState();
     await restoreConversation();
+    await loadMemory();
   } catch {
     setStatus('bad', 'Нет связи с сервером');
     $('aiError').textContent = 'Не удалось восстановить историю диалога.';
