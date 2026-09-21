@@ -111,7 +111,7 @@ func (s TaskState) Validate() error {
 	if s.Outcome != TaskOutcomeOpen && s.Outcome != TaskOutcomeCompleted && s.Outcome != TaskOutcomeCancelled {
 		return fmt.Errorf("invalid task outcome %q", s.Outcome)
 	}
-	if s.ResponseType != "" && s.ResponseType != ResponseTypeDiagnosis && s.ResponseType != ResponseTypeConversationRecall && s.ResponseType != ResponseTypeMetricComparison && s.ResponseType != ResponseTypeGeneralAnswer {
+	if s.ResponseType != "" && s.ResponseType != ResponseTypeDiagnosis && s.ResponseType != ResponseTypeConversationRecall && s.ResponseType != ResponseTypeMetricComparison && s.ResponseType != ResponseTypeGeneralAnswer && s.ResponseType != ResponseTypeInvariantConflict {
 		return fmt.Errorf("invalid task response type %q", s.ResponseType)
 	}
 	if s.Phase == TaskPhaseDone && s.Status == TaskStatusPaused {
@@ -307,6 +307,7 @@ const (
 	ResponseTypeConversationRecall ResponseType = "conversation_recall"
 	ResponseTypeMetricComparison   ResponseType = "metric_comparison"
 	ResponseTypeGeneralAnswer      ResponseType = "general_answer"
+	ResponseTypeInvariantConflict  ResponseType = "invariant_conflict"
 )
 
 const AssistantSchemaVersion = "assistant.v2"
@@ -319,6 +320,8 @@ type AssistantResponseV2 struct {
 	ConversationRecall *ConversationRecallResponse `json:"conversation_recall,omitempty"`
 	MetricComparison   *MetricComparisonResponse   `json:"metric_comparison,omitempty"`
 	GeneralAnswer      *GeneralAnswerResponse      `json:"general_answer,omitempty"`
+	InvariantConflict  *InvariantConflictResponse  `json:"invariant_conflict,omitempty"`
+	InvariantReview    *InvariantReview            `json:"invariant_review,omitempty"`
 	// Legacy convenience fields keep the public AnalysisResponse source-compatible
 	// for diagnosis consumers while the envelope supports additional response modes.
 	Status          string        `json:"-"`
@@ -342,6 +345,20 @@ type MetricComparisonResponse struct {
 type GeneralAnswerResponse struct {
 	Answer string `json:"answer"`
 	Topic  string `json:"topic"`
+}
+
+// InvariantConflictResponse is a deliberate refusal. Its IDs are validated
+// against the exact active invariant snapshot used for the request.
+type InvariantConflictResponse struct {
+	Answer         string   `json:"answer"`
+	InvariantIDs   []string `json:"invariant_ids"`
+	ConflictingIDs []string `json:"conflicting_ids,omitempty"`
+}
+
+// InvariantReview makes compliance visible without exposing private model
+// reasoning. It is required for non-conflicting replies when rules are active.
+type InvariantReview struct {
+	Status string `json:"status"`
 }
 
 type MetricPoint struct {

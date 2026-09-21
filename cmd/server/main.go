@@ -48,6 +48,10 @@ func main() {
 		os.Exit(1)
 	}
 	runtime.SetProfileStore(conversationStore)
+	if err := runtime.SetInvariantStore(ctx, conversationStore); err != nil {
+		logger.Error("invariant store unavailable", "error", err)
+		os.Exit(1)
+	}
 	if cfg.AIAPIKey != "" {
 		agent := ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), ai.DefaultSystemPrompt, conversationStore, cfg.AIContextTokenBudget)
 		agent.SetLogger(logger)

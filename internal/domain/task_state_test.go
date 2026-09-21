@@ -99,3 +99,11 @@ func TestTaskCancelIsTerminalAndPreservesNoCheckpoint(t *testing.T) {
 		t.Fatal("cancelled task was resumed")
 	}
 }
+
+func TestTaskStateAllowsInvariantConflictResponseType(t *testing.T) {
+	state := NewTaskState("task-1")
+	state.ResponseType = ResponseTypeInvariantConflict
+	if err := state.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}

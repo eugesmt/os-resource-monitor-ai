@@ -16,6 +16,7 @@ import (
 
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/invariants"
 	"taskmanager-ai/internal/memory"
 )
 
@@ -200,6 +201,57 @@ func TestAgentIncludesCurrentUserProfileOnEveryRequest(t *testing.T) {
 	}
 }
 
+func TestAgentReturnsValidatedInvariantConflict(t *testing.T) {
+	answer := `{"assistant_schema_version":"assistant.v2","response_type":"invariant_conflict","invariant_conflict":{"answer":"Не могу предложить Kubernetes: это нарушает правило проекта.","invariant_ids":["stack-no-kubernetes"]}}`
+	completion := &fakeCompletion{answer: answer}
+	agent := newAgent(completion, "test system prompt", &recordingHistory{})
+	if err := agent.invariants.Replace([]invariants.Invariant{{ID: "stack-no-kubernetes", Category: "stack", Statement: "Kubernetes is forbidden", Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := agent.ask(context.Background(), "Перенеси сервис на Kubernetes", "runtime context", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ResponseType != domain.ResponseTypeInvariantConflict || got.InvariantConflict == nil || got.InvariantConflict.InvariantIDs[0] != "stack-no-kubernetes" {
+		t.Fatalf("response = %#v", got)
+	}
+	if !strings.Contains(completion.systemPrompt, "PROJECT_INVARIANTS") || !strings.Contains(completion.systemPrompt, "stack-no-kubernetes") {
+		t.Fatalf("invariants missing from system prompt: %q", completion.systemPrompt)
+	}
+}
+
+func TestAgentRejectsUnknownInvariantConflict(t *testing.T) {
+	answer := `{"assistant_schema_version":"assistant.v2","response_type":"invariant_conflict","invariant_conflict":{"answer":"refusal","invariant_ids":["unknown"]}}`
+	agent := newAgent(&fakeCompletion{answer: answer}, "test", &recordingHistory{})
+	if err := agent.invariants.Replace([]invariants.Invariant{{ID: "known", Category: "stack", Statement: "rule", Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.ask(context.Background(), "question", "context", "", nil); err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestParseAssistantResponseNormalizesConflictingIDs(t *testing.T) {
+	content := `{"assistant_schema_version":"assistant.v2","response_type":"invariant_conflict","invariant_conflict":{"answer":"refusal","conflicting_ids":["rule-1"]}}`
+	got, err := parseAssistantResponse(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InvariantConflict == nil || !reflect.DeepEqual(got.InvariantConflict.InvariantIDs, []string{"rule-1"}) || len(got.InvariantConflict.ConflictingIDs) != 0 {
+		t.Fatalf("conflict = %#v", got.InvariantConflict)
+	}
+}
+
+func TestAgentRequiresComplianceReviewWhenInvariantsAreActive(t *testing.T) {
+	agent := newAgent(&fakeCompletion{answer: validAgentAnswer}, "test", &recordingHistory{})
+	if err := agent.invariants.Replace([]invariants.Invariant{{ID: "known", Category: "architecture", Statement: "keep monolith", Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.ask(context.Background(), "question", "context", "", nil); err == nil || !strings.Contains(err.Error(), "compliance review") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestAgentIsolatesConversationAndLongTermMemoryByProfile(t *testing.T) {
 	history := &recordingHistory{}
 	completion := &fakeCompletion{answer: validAgentAnswer}
@@ -348,6 +400,33 @@ func TestAgentPersistsAcceptedTurnAroundValidatedCompletion(t *testing.T) {
 	parsed, err := uuid.Parse(rawTurnID)
 	if err != nil || parsed[6]>>4 != 4 || parsed[8]>>6 != 2 {
 		t.Fatalf("turn ID %q is not RFC 9562 UUIDv4: bytes=%x err=%v", events[0].TurnID, parsed, err)
+	}
+}
+
+func TestAgentRecoversRecallWithCitationOutsideSelectedHistory(t *testing.T) {
+	history := &recordingHistory{events: []domain.ConversationEvent{
+		historyEvent(1, "turn-1", domain.EventRoleUser, "first question"),
+		historyEvent(2, "turn-1", domain.EventRoleAssistant, validAgentAnswer),
+	}}
+	completion := &fakeCompletion{answer: `{"assistant_schema_version":"assistant.v2","response_type":"conversation_recall","conversation_recall":{"answer":"ungrounded answer","event_ids":[999]}}`}
+	agent := newAgent(completion, "test system prompt", history)
+
+	if _, err := agent.AskWithSnapshot(context.Background(), "what did you say before?", freshSnapshot("snap-recall")); err != nil {
+		t.Fatalf("AskWithSnapshot() error = %v", err)
+	}
+	if completion.calls != 1 {
+		t.Fatalf("provider calls = %d, want 1", completion.calls)
+	}
+	events := history.snapshot()
+	if len(events) != 4 {
+		t.Fatalf("events = %#v, want user and recovered assistant event", events)
+	}
+	var persisted domain.AssistantResponseV2
+	if err := json.Unmarshal([]byte(events[3].Content), &persisted); err != nil {
+		t.Fatalf("decode recovered assistant response: %v", err)
+	}
+	if persisted.ConversationRecall == nil || persisted.ConversationRecall.EventIDs[0] != 2 || !strings.Contains(persisted.ConversationRecall.Answer, "Не могу надёжно подтвердить") {
+		t.Fatalf("persisted recall = %#v", persisted.ConversationRecall)
 	}
 }
 

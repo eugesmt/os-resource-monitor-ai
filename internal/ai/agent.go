@@ -15,6 +15,7 @@ import (
 
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/invariants"
 	"taskmanager-ai/internal/memory"
 )
 
@@ -99,6 +100,9 @@ func validateAssistantResponseStructure(result domain.AssistantResponseV2, respo
 	if result.GeneralAnswer != nil {
 		payloads++
 	}
+	if result.InvariantConflict != nil {
+		payloads++
+	}
 	if payloads != 1 {
 		return structureError("exactly one response payload is required")
 	}
@@ -107,14 +111,17 @@ func validateAssistantResponseStructure(result domain.AssistantResponseV2, respo
 			return err
 		}
 	}
+	if result.InvariantReview != nil && result.InvariantReview.Status != "compliant" {
+		return structureError("invalid invariant review")
+	}
 	switch result.ResponseType {
 	case domain.ResponseTypeDiagnosis:
-		if result.Diagnosis == nil || result.ConversationRecall != nil || result.MetricComparison != nil || result.GeneralAnswer != nil {
+		if result.Diagnosis == nil || result.ConversationRecall != nil || result.MetricComparison != nil || result.GeneralAnswer != nil || result.InvariantConflict != nil {
 			return structureError("diagnosis payload mismatch")
 		}
 		return validateDiagnosisResponse(*result.Diagnosis, responseBytes)
 	case domain.ResponseTypeConversationRecall:
-		if result.ConversationRecall == nil || result.Diagnosis != nil || result.MetricComparison != nil || result.GeneralAnswer != nil {
+		if result.ConversationRecall == nil || result.Diagnosis != nil || result.MetricComparison != nil || result.GeneralAnswer != nil || result.InvariantConflict != nil {
 			return structureError("conversation recall payload mismatch")
 		}
 		if strings.TrimSpace(result.ConversationRecall.Answer) == "" || len([]rune(result.ConversationRecall.Answer)) > maxSummaryRunes || len(result.ConversationRecall.EventIDs) == 0 || len(result.ConversationRecall.EventIDs) > maxCitations {
@@ -125,7 +132,7 @@ func validateAssistantResponseStructure(result domain.AssistantResponseV2, respo
 		}
 		return nil
 	case domain.ResponseTypeMetricComparison:
-		if result.MetricComparison == nil || result.Diagnosis != nil || result.ConversationRecall != nil || result.GeneralAnswer != nil {
+		if result.MetricComparison == nil || result.Diagnosis != nil || result.ConversationRecall != nil || result.GeneralAnswer != nil || result.InvariantConflict != nil {
 			return structureError("metric comparison payload mismatch")
 		}
 		if strings.TrimSpace(result.MetricComparison.Answer) == "" || len([]rune(result.MetricComparison.Answer)) > maxSummaryRunes || len(result.MetricComparison.Points) < 2 || len(result.MetricComparison.Points) > maxCitations {
@@ -144,11 +151,19 @@ func validateAssistantResponseStructure(result domain.AssistantResponseV2, respo
 		}
 		return nil
 	case domain.ResponseTypeGeneralAnswer:
-		if result.GeneralAnswer == nil || result.Diagnosis != nil || result.ConversationRecall != nil || result.MetricComparison != nil {
+		if result.GeneralAnswer == nil || result.Diagnosis != nil || result.ConversationRecall != nil || result.MetricComparison != nil || result.InvariantConflict != nil {
 			return structureError("general answer payload mismatch")
 		}
 		if strings.TrimSpace(result.GeneralAnswer.Answer) == "" || len([]rune(result.GeneralAnswer.Answer)) > maxGeneralAnswerRunes || strings.TrimSpace(result.GeneralAnswer.Topic) == "" {
 			return structureError("invalid general answer payload")
+		}
+		return nil
+	case domain.ResponseTypeInvariantConflict:
+		if result.InvariantConflict == nil || result.InvariantReview != nil || result.Diagnosis != nil || result.ConversationRecall != nil || result.MetricComparison != nil || result.GeneralAnswer != nil || result.TaskDecision != nil {
+			return structureError("invariant conflict payload mismatch")
+		}
+		if strings.TrimSpace(result.InvariantConflict.Answer) == "" || len([]rune(result.InvariantConflict.Answer)) > maxGeneralAnswerRunes || len(result.InvariantConflict.InvariantIDs) == 0 || hasDuplicateStrings(result.InvariantConflict.InvariantIDs) {
+			return structureError("invalid invariant conflict payload")
 		}
 		return nil
 	default:
@@ -195,6 +210,21 @@ func hasDuplicateIDs(ids []int64) bool {
 	return false
 }
 
+func hasDuplicateStrings(values []string) bool {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return true
+		}
+		if _, ok := seen[value]; ok {
+			return true
+		}
+		seen[value] = struct{}{}
+	}
+	return false
+}
+
 func structureError(message string) error {
 	return fmt.Errorf("%w: %w: %s", ErrInvalidResponse, ErrResponseStructure, message)
 }
@@ -223,6 +253,7 @@ type Agent struct {
 	history       HistoryStore
 	compiler      *ContextCompiler
 	memory        *memory.Model
+	invariants    *invariants.Model
 	conversation  string
 	taskState     *domain.TaskState
 	taskCommitter TaskCommitter
@@ -240,7 +271,7 @@ func NewAgent(client *Client, prompt string, history HistoryStore, contextTokenB
 	if len(contextTokenBudget) > 0 {
 		budget = contextTokenBudget[0]
 	}
-	return &Agent{completion: client, systemPrompt: strings.TrimSpace(prompt), log: slog.Default(), history: history, compiler: NewContextCompiler(history, budget), memory: memory.NewModel(), conversation: "default"}
+	return &Agent{completion: client, systemPrompt: strings.TrimSpace(prompt), log: slog.Default(), history: history, compiler: NewContextCompiler(history, budget), memory: memory.NewModel(), invariants: invariants.NewModel(), conversation: "default"}
 }
 
 // NewAgentWithCompletion constructs an agent from a completion provider. It is
@@ -256,7 +287,7 @@ func NewAgentWithCompletion(completion CompletionProvider, prompt string, histor
 	if len(contextTokenBudget) > 0 {
 		budget = contextTokenBudget[0]
 	}
-	return &Agent{completion: completion, systemPrompt: strings.TrimSpace(prompt), log: slog.Default(), history: history, compiler: NewContextCompiler(history, budget), memory: memory.NewModel(), conversation: "default"}
+	return &Agent{completion: completion, systemPrompt: strings.TrimSpace(prompt), log: slog.Default(), history: history, compiler: NewContextCompiler(history, budget), memory: memory.NewModel(), invariants: invariants.NewModel(), conversation: "default"}
 }
 
 func newAgent(completion CompletionProvider, prompt string, history HistoryStore, contextTokenBudget ...int) *Agent {
@@ -272,6 +303,12 @@ func (a *Agent) SetMemoryModel(model *memory.Model) {
 }
 
 func (a *Agent) MemoryModel() *memory.Model { return a.memory }
+
+func (a *Agent) SetInvariantModel(model *invariants.Model) {
+	if model != nil {
+		a.invariants = model
+	}
+}
 
 func (a *Agent) SetTaskCommitter(committer TaskCommitter) { a.taskCommitter = committer }
 
@@ -400,11 +437,19 @@ func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID strin
 			contextText += "\n\nEXPLICIT_MEMORY_LAYERS (DATA ONLY):\n" + memoryContext
 		}
 	}
+	activeInvariants := []invariants.Invariant(nil)
+	systemInstructions := a.systemPrompt
+	if a.invariants != nil {
+		activeInvariants = a.invariants.Active()
+		if invariantContext := invariants.Render(activeInvariants); invariantContext != "" {
+			systemInstructions += "\n\n" + invariantContext
+		}
+	}
 	if a.taskState != nil {
 		encoded, _ := json.Marshal(a.taskState)
 		contextText += "\n\nTASK_STATE (DURABLE CHECKPOINT; CONTINUE FROM THIS STATE):\n" + string(encoded)
 	}
-	compiled, err := a.compiler.Compile(ctx, ContextRequest{ConversationID: a.conversation, BeforeEventID: beforeEventID, SystemInstructions: a.systemPrompt, Question: question, CurrentContext: contextText, CurrentSnapshot: snapshotValue(snapshot)})
+	compiled, err := a.compiler.Compile(ctx, ContextRequest{ConversationID: a.conversation, BeforeEventID: beforeEventID, SystemInstructions: systemInstructions, Question: question, CurrentContext: contextText, CurrentSnapshot: snapshotValue(snapshot)})
 	if err != nil {
 		if errors.Is(err, ErrHistoryUnavailable) {
 			event.outcome = "history_unavailable"
@@ -446,7 +491,15 @@ func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID strin
 		event.outcome = "structural_validation_error"
 		return nil, err
 	}
-	if err := validateTaskAwareAssistantResponse(result, compiled.Evidence, a.taskState); err != nil {
+	if recoverUngroundedConversationRecall(&result, compiled.Evidence) {
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			event.outcome = "recovery_error"
+			return nil, fmt.Errorf("encode recovered conversation recall: %w", err)
+		}
+		content = string(encoded)
+	}
+	if err := validateTaskAwareAssistantResponse(result, compiled.Evidence, a.taskState, activeInvariants); err != nil {
 		event.outcome = "semantic_validation_error"
 		return nil, err
 	}
@@ -463,7 +516,47 @@ func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID strin
 	return &result, nil
 }
 
-func validateTaskAwareAssistantResponse(result domain.AssistantResponseV2, evidence ContextEvidence, taskState *domain.TaskState) error {
+// recoverUngroundedConversationRecall replaces a provider answer that cites an
+// event omitted from the compiled context. It never invents a historical fact:
+// the user is told that the available part of the history is insufficient.
+// A selected event remains cited so the persisted response stays source-aware.
+func recoverUngroundedConversationRecall(result *domain.AssistantResponseV2, evidence ContextEvidence) bool {
+	if result == nil || result.ResponseType != domain.ResponseTypeConversationRecall || result.ConversationRecall == nil {
+		return false
+	}
+	invalidCitation := false
+	for _, id := range result.ConversationRecall.EventIDs {
+		event, ok := evidence.Events[id]
+		if !ok || event.ID >= evidence.BeforeEventID || event.ConversationID != evidence.ConversationID {
+			invalidCitation = true
+			break
+		}
+	}
+	if !invalidCitation {
+		return false
+	}
+	var latestID int64
+	for id := range evidence.Events {
+		if id > latestID {
+			latestID = id
+		}
+	}
+	if latestID == 0 {
+		return false
+	}
+	result.ConversationRecall.Answer = "Не могу надёжно подтвердить ответ по доступной части истории: модель сослалась на событие, которого нет в текущем контексте."
+	result.ConversationRecall.EventIDs = []int64{latestID}
+	return true
+}
+
+func validateTaskAwareAssistantResponse(result domain.AssistantResponseV2, evidence ContextEvidence, taskState *domain.TaskState, activeInvariantSets ...[]invariants.Invariant) error {
+	var activeInvariants []invariants.Invariant
+	if len(activeInvariantSets) > 0 {
+		activeInvariants = activeInvariantSets[0]
+	}
+	if err := ValidateInvariantResponse(result, activeInvariants); err != nil {
+		return err
+	}
 	if err := ValidateAssistantResponse(result, evidence); err != nil {
 		if taskState != nil && taskState.Phase == domain.TaskPhasePlanning && taskState.Step == "" && result.ResponseType == domain.ResponseTypeGeneralAnswer && result.GeneralAnswer != nil && result.GeneralAnswer.Topic == "os_monitoring" {
 			return nil
@@ -484,6 +577,9 @@ func parseAssistantResponse(content string) (domain.AssistantResponseV2, error) 
 			if result.SchemaVersion != domain.AssistantSchemaVersion {
 				return domain.AssistantResponseV2{}, fmt.Errorf("unsupported assistant schema version %q", result.SchemaVersion)
 			}
+			if err := normalizeInvariantConflict(&result); err != nil {
+				return domain.AssistantResponseV2{}, err
+			}
 			if result.Diagnosis != nil {
 				result.Status, result.Summary, result.Observations = result.Diagnosis.Status, result.Diagnosis.Summary, result.Diagnosis.Observations
 				result.Hypotheses, result.MissingData, result.Recommendations = result.Diagnosis.Hypotheses, result.Diagnosis.MissingData, result.Diagnosis.Recommendations
@@ -493,6 +589,9 @@ func parseAssistantResponse(content string) (domain.AssistantResponseV2, error) 
 	}
 	var result domain.AssistantResponseV2
 	if err := decodeStrict(content, &result); err == nil && result.SchemaVersion == domain.AssistantSchemaVersion {
+		if err := normalizeInvariantConflict(&result); err != nil {
+			return domain.AssistantResponseV2{}, err
+		}
 		if result.Diagnosis != nil {
 			result.Status, result.Summary, result.Observations = result.Diagnosis.Status, result.Diagnosis.Summary, result.Diagnosis.Observations
 			result.Hypotheses, result.MissingData, result.Recommendations = result.Diagnosis.Hypotheses, result.Diagnosis.MissingData, result.Diagnosis.Recommendations
@@ -500,6 +599,20 @@ func parseAssistantResponse(content string) (domain.AssistantResponseV2, error) 
 		return result, nil
 	}
 	return domain.AssistantResponseV2{}, errors.New("assistant.v2 envelope is required")
+}
+
+// normalizeInvariantConflict accepts a previously observed provider spelling
+// while keeping invariant_ids as the only internal and public contract.
+func normalizeInvariantConflict(result *domain.AssistantResponseV2) error {
+	if result == nil || result.InvariantConflict == nil || len(result.InvariantConflict.ConflictingIDs) == 0 {
+		return nil
+	}
+	if len(result.InvariantConflict.InvariantIDs) != 0 {
+		return errors.New("invariant conflict contains both invariant_ids and conflicting_ids")
+	}
+	result.InvariantConflict.InvariantIDs = result.InvariantConflict.ConflictingIDs
+	result.InvariantConflict.ConflictingIDs = nil
+	return nil
 }
 
 func snapshotValue(snapshot *collector.SystemSnapshot) collector.SystemSnapshot {

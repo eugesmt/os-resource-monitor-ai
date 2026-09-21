@@ -175,6 +175,23 @@
       <div id="memoryView" class="memory-view">Память загружается…</div>
       <div id="memoryError" class="error" role="alert"></div>
     </section>
+    <section class="card panel invariants-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Инварианты ассистента</h2>
+          <div class="panel-hint">Обязательные правила проекта, отдельные от диалога и памяти</div>
+        </div>
+      </div>
+      <form id="invariantForm" class="invariant-form">
+        <input id="invariantID" maxlength="128" required placeholder="ID, например stack-no-kubernetes" />
+        <input id="invariantCategory" maxlength="64" required placeholder="Категория: stack, architecture…" />
+        <input id="invariantStatement" maxlength="2000" required placeholder="Правило, которое нельзя нарушать" />
+        <label class="invariant-enabled"><input id="invariantEnabled" type="checkbox" checked /> Активен</label>
+        <button type="submit">Сохранить</button>
+      </form>
+      <div id="invariantsView" class="invariants-view">Инварианты загружаются…</div>
+      <div id="invariantsError" class="error" role="alert"></div>
+    </section>
   </main>
   <dialog id="profileDialog" class="profile-dialog">
     <div class="panel-head">

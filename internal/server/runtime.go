@@ -13,6 +13,7 @@ import (
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/invariants"
 	"taskmanager-ai/internal/memory"
 	"taskmanager-ai/internal/storage"
 )
@@ -39,6 +40,8 @@ type Runtime struct {
 	memory           *memory.Model
 	memoryStore      memoryStore
 	profiles         profileStore
+	invariantStore   invariantStore
+	invariants       *invariants.Model
 	tasks            taskStateStore
 	askMu            sync.Mutex
 	taskStateMu      sync.RWMutex
@@ -65,6 +68,12 @@ type profileStore interface {
 	ListProfiles(context.Context) ([]memory.Profile, error)
 }
 
+type invariantStore interface {
+	ReplaceInvariants(context.Context, []invariants.Invariant) error
+	ListInvariants(context.Context) ([]invariants.Invariant, error)
+	DeleteInvariant(context.Context, string) error
+}
+
 type taskStateStore interface {
 	CreateTask(context.Context, string) (domain.TaskState, error)
 	GetOpenTask(context.Context, string) (domain.TaskState, error)
@@ -86,7 +95,7 @@ func NewRuntime(c *collector.Collector, buffer *storage.RingBuffer, logger *slog
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Runtime{collector: c, buffer: buffer, log: logger, memory: memory.NewModel(), subscribers: make(map[chan collector.SystemSnapshot]struct{}), runningTasks: make(map[string]struct{})}
+	return &Runtime{collector: c, buffer: buffer, log: logger, memory: memory.NewModel(), invariants: invariants.NewModel(), subscribers: make(map[chan collector.SystemSnapshot]struct{}), runningTasks: make(map[string]struct{})}
 }
 
 func (s *Runtime) SetAIAgent(agent *ai.Agent) {
@@ -94,6 +103,7 @@ func (s *Runtime) SetAIAgent(agent *ai.Agent) {
 	s.aiAgent = agent
 	if agent != nil {
 		agent.SetMemoryModel(s.memory)
+		agent.SetInvariantModel(s.invariants)
 		agent.SetConversation(s.ConversationID())
 		if s.tasks != nil {
 			agent.SetTaskCommitter(s.tasks)
@@ -103,6 +113,45 @@ func (s *Runtime) SetAIAgent(agent *ai.Agent) {
 		}
 	}
 	s.agentMu.Unlock()
+}
+
+func (s *Runtime) SetInvariantStore(ctx context.Context, store invariantStore) error {
+	s.invariantStore = store
+	if store == nil {
+		return nil
+	}
+	items, err := store.ListInvariants(ctx)
+	if err != nil {
+		return err
+	}
+	return s.invariants.Replace(items)
+}
+
+func (s *Runtime) Invariants() []invariants.Invariant { return s.invariants.All() }
+
+func (s *Runtime) ReplaceInvariants(ctx context.Context, items []invariants.Invariant) error {
+	if err := invariants.NewModel().Replace(items); err != nil {
+		return err
+	}
+	s.askMu.Lock()
+	defer s.askMu.Unlock()
+	if s.invariantStore != nil {
+		if err := s.invariantStore.ReplaceInvariants(ctx, items); err != nil {
+			return err
+		}
+	}
+	return s.invariants.Replace(items)
+}
+
+func (s *Runtime) DeleteInvariant(ctx context.Context, id string) error {
+	s.askMu.Lock()
+	defer s.askMu.Unlock()
+	if s.invariantStore != nil {
+		if err := s.invariantStore.DeleteInvariant(ctx, id); err != nil {
+			return err
+		}
+	}
+	return s.invariants.Delete(id)
 }
 
 func (s *Runtime) MemoryModel() *memory.Model { return s.memory }
@@ -380,7 +429,8 @@ func (s *Runtime) scheduleTask(taskID, firstQuestion string) {
 					return
 				}
 				step, action := responseTypeCheckpoint(result.ResponseType)
-				if s.advanceTask(taskID, state.Version, domain.TaskPhaseExecution, step, action, result.ResponseType) != nil {
+				if err := s.advanceTask(taskID, state.Version, domain.TaskPhaseExecution, step, action, result.ResponseType); err != nil {
+					s.log.Error("task transition failed", "task_id", taskID, "error", err)
 					return
 				}
 			case domain.TaskPhaseExecution:
@@ -405,6 +455,8 @@ func responseTypeCheckpoint(responseType domain.ResponseType) (string, string) {
 		return "Сопоставить метрики с историческими точками", "Проверить источники и единицы измерения"
 	case domain.ResponseTypeGeneralAnswer:
 		return "Проверить ответ по контексту запроса", "Сохранить итоговый ответ"
+	case domain.ResponseTypeInvariantConflict:
+		return "Зафиксировать конфликт с инвариантом", "Показать отказ и затронутые правила"
 	default:
 		return "Сопоставить вывод с текущим snapshot", "Проверить метрики и выводы"
 	}

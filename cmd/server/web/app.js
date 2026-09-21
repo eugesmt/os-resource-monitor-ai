@@ -353,6 +353,11 @@ function formatAIAnswer(answer) {
     if (answer.response_type === 'general_answer' && answer.general_answer) {
       return answer.general_answer.answer || 'Пустой ответ от AI';
     }
+    if (answer.response_type === 'invariant_conflict' && answer.invariant_conflict) {
+      const conflict = answer.invariant_conflict;
+      const ids = Array.isArray(conflict.invariant_ids) ? conflict.invariant_ids.join(', ') : '';
+      return [conflict.answer || 'Запрос конфликтует с правилами проекта.', ids ? `Нарушенные инварианты: ${ids}` : ''].filter(Boolean).join('\n\n');
+    }
   }
 
   const parts = [];
@@ -708,6 +713,7 @@ function renderMemory(context) {
       if (type === 'general_answer') return response.general_answer?.answer || 'Общий ответ';
       if (type === 'conversation_recall') return response.conversation_recall?.answer || 'Ответ по истории диалога';
       if (type === 'metric_comparison') return response.metric_comparison?.summary || 'Сравнение метрик';
+      if (type === 'invariant_conflict') return response.invariant_conflict?.answer || 'Запрос отклонён из-за инварианта';
     } catch {
       // Keep non-JSON historical content readable.
     }
@@ -795,6 +801,88 @@ if ($('memoryForm')) {
   });
 }
 
+let invariants = [];
+
+function renderInvariants(items) {
+  invariants = Array.isArray(items) ? items : [];
+  const view = $('invariantsView');
+  view.replaceChildren();
+  if (!invariants.length) {
+    view.textContent = 'Инварианты не заданы';
+    return;
+  }
+  invariants.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = `invariant-record${item.enabled ? '' : ' inactive'}`;
+    const text = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'invariant-title';
+    title.textContent = item.id;
+    const details = document.createElement('div');
+    details.className = 'invariant-meta';
+    details.textContent = `${item.category}: ${item.statement}${item.enabled ? '' : ' · выключен'}`;
+    text.append(title, details);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'invariant-delete';
+    remove.dataset.invariantId = item.id;
+    remove.textContent = 'Удалить';
+    row.append(text, remove);
+    view.append(row);
+  });
+}
+
+async function loadInvariants() {
+  const response = await fetch('/api/ai/invariants', { cache: 'no-store' });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось загрузить инварианты');
+  renderInvariants(payload.items);
+}
+
+if ($('invariantForm')) {
+  $('invariantForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    $('invariantsError').textContent = '';
+    const item = {
+      id: $('invariantID').value.trim(),
+      category: $('invariantCategory').value.trim(),
+      statement: $('invariantStatement').value.trim(),
+      enabled: $('invariantEnabled').checked,
+    };
+    try {
+      const next = invariants.filter((current) => current.id !== item.id);
+      next.push(item);
+      const response = await fetch('/api/ai/invariants', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: next }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Не удалось сохранить инвариант');
+      renderInvariants(payload.items);
+      $('invariantForm').reset();
+      $('invariantEnabled').checked = true;
+    } catch (error) {
+      $('invariantsError').textContent = error instanceof Error ? error.message : 'Ошибка сохранения инварианта';
+    }
+  });
+  $('invariantsView').addEventListener('click', async (event) => {
+    const button = event.target.closest('.invariant-delete');
+    if (!button) return;
+    button.disabled = true;
+    $('invariantsError').textContent = '';
+    try {
+      const response = await fetch(`/api/ai/invariants/${encodeURIComponent(button.dataset.invariantId)}`, { method: 'DELETE' });
+      if (!response.ok) {
+        const payload = await response.json();
+        throw new Error(payload.error || 'Не удалось удалить инвариант');
+      }
+      await loadInvariants();
+    } catch (error) {
+      $('invariantsError').textContent = error instanceof Error ? error.message : 'Ошибка удаления инварианта';
+      button.disabled = false;
+    }
+  });
+}
+
 window.addEventListener('resize', () => drawChart(history));
 
 (async function init() {
@@ -805,6 +893,7 @@ window.addEventListener('resize', () => drawChart(history));
     await loadTaskState();
     await restoreConversation();
     await loadMemory();
+    await loadInvariants();
   } catch {
     setStatus('bad', 'Нет связи с сервером');
     $('aiError').textContent = 'Не удалось восстановить историю диалога.';

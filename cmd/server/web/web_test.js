@@ -5,6 +5,11 @@ const source = fs.readFileSync(`${__dirname}/app.js`, 'utf8');
 assert.match(source, /profileForm/);
 assert.match(source, /\/api\/ai\/profile/);
 assert.match(source, /\/api\/ai\/profiles/);
+assert.match(source, /\/api\/ai\/invariants/);
+assert.match(source, /invariantForm/);
+assert.match(source, /invariant-delete/);
+assert.match(source, /method: 'DELETE'/);
+assert.match(source, /invariant_conflict/);
 assert.match(source, /method: 'PUT'/);
 assert.match(source, /profileMenuButton/);
 assert.match(source, /addProfileButton/);
@@ -47,6 +52,14 @@ assert.match(rendered, /Гипотезы:/);
 assert.match(rendered, /Недостающие данные:/);
 assert.match(rendered, /Рекомендации:/);
 assert.doesNotMatch(rendered, /facts/i);
+
+const conflictRendered = formatAIAnswer({
+  assistant_schema_version: 'assistant.v2',
+  response_type: 'invariant_conflict',
+  invariant_conflict: { answer: 'Не могу автоматически завершить процесс.', invariant_ids: ['no-auto-kill'] },
+});
+assert.match(conflictRendered, /Не могу автоматически завершить процесс/);
+assert.match(conflictRendered, /no-auto-kill/);
 
 const taskRenderStart = source.indexOf('function updateAskAvailability');
 const taskRenderMiddle = source.indexOf("$('question').addEventListener", taskRenderStart);

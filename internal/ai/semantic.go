@@ -7,7 +7,33 @@ import (
 
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/invariants"
 )
+
+func ValidateInvariantResponse(result domain.AssistantResponseV2, active []invariants.Invariant) error {
+	if len(active) == 0 {
+		return nil
+	}
+	if result.ResponseType != domain.ResponseTypeInvariantConflict {
+		if result.InvariantReview == nil || result.InvariantReview.Status != "compliant" {
+			return fmt.Errorf("%w: active invariants require an explicit compliance review", ErrSemanticValidation)
+		}
+		return nil
+	}
+	if result.InvariantConflict == nil {
+		return fmt.Errorf("%w: missing invariant conflict", ErrSemanticValidation)
+	}
+	allowed := make(map[string]struct{}, len(active))
+	for _, item := range active {
+		allowed[item.ID] = struct{}{}
+	}
+	for _, id := range result.InvariantConflict.InvariantIDs {
+		if _, ok := allowed[id]; !ok {
+			return fmt.Errorf("%w: invariant %q is not active", ErrSemanticValidation, id)
+		}
+	}
+	return nil
+}
 
 func ValidateDiagnosis(result domain.DiagnosisResultV1, snapshot collector.SystemSnapshot) error {
 	if err := validateMissingData(result.MissingData, snapshot.MissingData); err != nil {
@@ -104,6 +130,8 @@ func ValidateAssistantResponse(result domain.AssistantResponseV2, evidence Conte
 		if !generalDomainSignal(evidence.Question, result.GeneralAnswer.Topic, evidence.CurrentSnapshot) {
 			return fmt.Errorf("%w: general answer is outside OS monitoring domain", ErrSemanticValidation)
 		}
+		return nil
+	case domain.ResponseTypeInvariantConflict:
 		return nil
 	default:
 		return fmt.Errorf("%w: unknown response type", ErrSemanticValidation)

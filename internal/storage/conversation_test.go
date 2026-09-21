@@ -13,6 +13,7 @@ import (
 
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/invariants"
 	"taskmanager-ai/internal/memory"
 
 	_ "modernc.org/sqlite"
@@ -64,6 +65,20 @@ func migratedConversationDB(t *testing.T) string {
 	if _, err := db.Exec(profilesUp); err != nil {
 		_ = db.Close()
 		t.Fatalf("apply profiles migration: %v", err)
+	}
+	invariantsMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920290000_assistant_invariants.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read invariants migration: %v", err)
+	}
+	invariantsUp, _, ok := strings.Cut(string(invariantsMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("invariants migration has no Down marker")
+	}
+	if _, err := db.Exec(invariantsUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply invariants migration: %v", err)
 	}
 	taskMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920230000_task_states.sql"))
 	if err != nil {
@@ -148,6 +163,20 @@ func migratedConversationDB(t *testing.T) string {
 	if _, err := db.Exec(taskGoalUp); err != nil {
 		_ = db.Close()
 		t.Fatalf("apply task goal migration: %v", err)
+	}
+	taskInvariantMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920300000_task_invariant_conflict_response.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read task invariant migration: %v", err)
+	}
+	taskInvariantUp, _, ok := strings.Cut(string(taskInvariantMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("task invariant migration has no Down marker")
+	}
+	if _, err := db.Exec(taskInvariantUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply task invariant migration: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close migration database: %v", err)
@@ -368,6 +397,33 @@ func TestConversationStorePersistsProfiles(t *testing.T) {
 	}
 	if len(profiles) != 1 || !reflect.DeepEqual(profiles[0], want) {
 		t.Fatalf("profiles = %#v, want %#v", profiles, []memory.Profile{want})
+	}
+}
+
+func TestConversationStorePersistsInvariantsSeparately(t *testing.T) {
+	store, path := openConversationTestStore(t)
+	ctx := context.Background()
+	want := []invariants.Invariant{{ID: "architecture-monolith", Category: "architecture", Statement: "Keep the modular monolith", Enabled: true}}
+	if err := store.ReplaceInvariants(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewConversationStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.ListInvariants(ctx)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("invariants = %#v, err=%v", got, err)
+	}
+	if err := reopened.DeleteInvariant(ctx, want[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := reopened.ListInvariants(ctx); err != nil || len(items) != 0 {
+		t.Fatalf("invariants after delete = %#v, err=%v", items, err)
 	}
 }
 

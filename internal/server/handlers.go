@@ -17,6 +17,7 @@ import (
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/invariants"
 	"taskmanager-ai/internal/memory"
 	"taskmanager-ai/internal/storage"
 )
@@ -51,6 +52,9 @@ type profileRequest struct {
 	Style       string   `json:"style"`
 	Format      string   `json:"format"`
 	Constraints []string `json:"constraints"`
+}
+type invariantsRequest struct {
+	Items []invariants.Invariant `json:"items"`
 }
 type taskStateRequest struct {
 	TaskID  string                 `json:"task_id"`
@@ -391,6 +395,51 @@ func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 			return
 		}
 		writeJSON(w, http.StatusOK, profiles)
+	})
+	mux.HandleFunc("/api/ai/invariants", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, struct {
+				Items []invariants.Invariant `json:"items"`
+			}{Items: state.Invariants()})
+		case http.MethodPut:
+			defer r.Body.Close()
+			var req invariantsRequest
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+				writeAPIError(w, http.StatusBadRequest, errors.New("invalid JSON body"))
+				return
+			}
+			if err := state.ReplaceInvariants(r.Context(), req.Items); err != nil {
+				writeAPIError(w, http.StatusBadRequest, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, struct {
+				Items []invariants.Invariant `json:"items"`
+			}{Items: state.Invariants()})
+		default:
+			methodNotAllowed(w)
+		}
+	})
+	mux.HandleFunc("/api/ai/invariants/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			methodNotAllowed(w)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/ai/invariants/")
+		if id == "" || strings.Contains(id, "/") {
+			writeAPIError(w, http.StatusBadRequest, errors.New("invariant id is required"))
+			return
+		}
+		if err := state.DeleteInvariant(r.Context(), id); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				writeAPIError(w, http.StatusNotFound, err)
+				return
+			}
+			state.log.Error("invariant deletion failed", "error", err)
+			writeAPIError(w, http.StatusServiceUnavailable, errors.New("invariant storage unavailable"))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/api/ai/memory", func(w http.ResponseWriter, r *http.Request) {
 		model := state.MemoryModel()

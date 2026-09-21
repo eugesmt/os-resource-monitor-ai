@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/invariants"
 	"taskmanager-ai/internal/memory"
 	"uuid"
 
@@ -72,6 +73,7 @@ func (s *ConversationStore) verify(ctx context.Context) error {
 		{table: "conversation_events", columns: []string{"id", "conversation_id", "turn_id", "role", "content", "snapshot_id", "created_at"}},
 		{table: "memory_records", columns: []string{"id", "layer", "scope", "kind", "content", "created_at"}},
 		{table: "profiles", columns: []string{"user_id", "style", "format", "constraints_json"}},
+		{table: "assistant_invariants", columns: []string{"id", "category", "statement", "enabled"}},
 		{table: "tasks", columns: []string{"task_id", "conversation_id", "goal", "phase", "step", "expected_action_kind", "expected_action", "status", "outcome", "last_error", "response_type", "version", "created_at", "updated_at"}},
 	}
 	for _, expected := range wantColumns {
@@ -267,6 +269,58 @@ func (s *ConversationStore) ListProfiles(ctx context.Context) ([]memory.Profile,
 		profiles = append(profiles, profile)
 	}
 	return profiles, rows.Err()
+}
+
+func (s *ConversationStore) ReplaceInvariants(ctx context.Context, items []invariants.Invariant) error {
+	if err := invariants.NewModel().Replace(items); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM assistant_invariants`); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO assistant_invariants (id, category, statement, enabled) VALUES (?, ?, ?, ?)`, item.ID, item.Category, item.Statement, item.Enabled); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *ConversationStore) ListInvariants(ctx context.Context) ([]invariants.Invariant, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, category, statement, enabled FROM assistant_invariants ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]invariants.Invariant, 0)
+	for rows.Next() {
+		var item invariants.Invariant
+		if err := rows.Scan(&item.ID, &item.Category, &item.Statement, &item.Enabled); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *ConversationStore) DeleteInvariant(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM assistant_invariants WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return errors.New("invariant not found")
+	}
+	return nil
 }
 
 func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {

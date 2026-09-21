@@ -18,6 +18,7 @@ import (
 	"taskmanager-ai/internal/ai"
 	"taskmanager-ai/internal/collector"
 	"taskmanager-ai/internal/domain"
+	"taskmanager-ai/internal/invariants"
 	"taskmanager-ai/internal/storage"
 
 	_ "modernc.org/sqlite"
@@ -69,7 +70,7 @@ func taskTestStore(t *testing.T) *storage.ConversationStore {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"20260920120000_conversation_event_log.sql", "20260920200000_memory_records.sql", "20260920220000_profiles.sql", "20260920230000_task_states.sql", "20260920240000_tasks.sql", "20260920250000_task_outcome.sql", "20260920260000_task_last_error.sql", "20260920270000_task_response_type.sql", "20260920280000_task_goal.sql"} {
+	for _, name := range []string{"20260920120000_conversation_event_log.sql", "20260920200000_memory_records.sql", "20260920220000_profiles.sql", "20260920230000_task_states.sql", "20260920240000_tasks.sql", "20260920250000_task_outcome.sql", "20260920260000_task_last_error.sql", "20260920270000_task_response_type.sql", "20260920280000_task_goal.sql", "20260920290000_assistant_invariants.sql", "20260920300000_task_invariant_conflict_response.sql"} {
 		raw, readErr := os.ReadFile(filepath.Join("..", "..", "migrations", name))
 		if readErr != nil {
 			_ = db.Close()
@@ -371,6 +372,26 @@ func TestAskHTTPRejectsMissingTaskDecisionWithoutAdvancingState(t *testing.T) {
 	}
 	if len(events) != 2 || events[0].Role != domain.EventRoleUser || events[1].Role != domain.EventRoleAssistant {
 		t.Fatalf("events = %#v, want user and accepted assistant event", events)
+	}
+}
+
+func TestAutomaticTaskCompletesAfterInvariantConflict(t *testing.T) {
+	completion := &countedCompletion{contents: []string{`{"assistant_schema_version":"assistant.v2","response_type":"invariant_conflict","invariant_conflict":{"answer":"Нельзя автоматически завершать процессы.","invariant_ids":["no-auto-kill-processes"]}}`}}
+	runtime, store := taskTestRuntime(t, completion)
+	if err := runtime.ReplaceInvariants(context.Background(), []invariants.Invariant{{ID: "no-auto-kill-processes", Category: "business_rule", Statement: "no automatic process termination", Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runtime.StartTaskRun(context.Background(), "Проверь процесс с высокой нагрузкой CPU")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(4 * automaticTaskTurnDelay)
+	state, err := store.GetLatestTask(context.Background(), storage.DefaultConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Phase != domain.TaskPhaseDone || state.Outcome != domain.TaskOutcomeCompleted || state.ResponseType != domain.ResponseTypeInvariantConflict {
+		t.Fatalf("task state = %#v", state)
 	}
 }
 

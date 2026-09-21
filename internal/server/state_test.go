@@ -132,6 +132,34 @@ func TestConversationHistoryEndpointReturnsOrderedEvents(t *testing.T) {
 	}
 }
 
+func TestInvariantEndpointsCreateListAndDelete(t *testing.T) {
+	runtime := NewRuntime(nil, storage.NewRingBuffer(1), nil)
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, runtime, fstest.MapFS{"index.html": {Data: []byte("ok")}})
+	body := strings.NewReader(`{"items":[{"id":"stack-no-kubernetes","category":"stack","statement":"Kubernetes is forbidden","enabled":true}]}`)
+	put := httptest.NewRecorder()
+	mux.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/ai/invariants", body))
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT status=%d body=%s", put.Code, put.Body.String())
+	}
+	if got := runtime.Invariants(); len(got) != 1 || got[0].ID != "stack-no-kubernetes" {
+		t.Fatalf("invariants=%#v", got)
+	}
+	remove := httptest.NewRecorder()
+	mux.ServeHTTP(remove, httptest.NewRequest(http.MethodDelete, "/api/ai/invariants/stack-no-kubernetes", nil))
+	if remove.Code != http.StatusNoContent {
+		t.Fatalf("DELETE status=%d body=%s", remove.Code, remove.Body.String())
+	}
+	if got := runtime.Invariants(); len(got) != 0 {
+		t.Fatalf("invariants after delete=%#v", got)
+	}
+	missing := httptest.NewRecorder()
+	mux.ServeHTTP(missing, httptest.NewRequest(http.MethodDelete, "/api/ai/invariants/stack-no-kubernetes", nil))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing DELETE status=%d", missing.Code)
+	}
+}
+
 func TestConversationHistoryEndpointHidesStorageError(t *testing.T) {
 	runtime := NewRuntime(nil, storage.NewRingBuffer(1), nil)
 	runtime.SetHistoryStore(&historyStub{err: errors.New("database path and details")})
