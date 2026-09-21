@@ -11,6 +11,7 @@ import (
 
 	"taskmanager-ai/internal/domain"
 	"taskmanager-ai/internal/memory"
+	"uuid"
 
 	_ "modernc.org/sqlite"
 )
@@ -18,6 +19,7 @@ import (
 const DefaultConversationID = "default"
 
 var ErrInvalidEventRole = errors.New("invalid conversation event role")
+var ErrTaskStateVersionConflict = errors.New("task state version conflict")
 
 type ConversationStore struct{ db *sql.DB }
 
@@ -70,6 +72,7 @@ func (s *ConversationStore) verify(ctx context.Context) error {
 		{table: "conversation_events", columns: []string{"id", "conversation_id", "turn_id", "role", "content", "snapshot_id", "created_at"}},
 		{table: "memory_records", columns: []string{"id", "layer", "scope", "kind", "content", "created_at"}},
 		{table: "profiles", columns: []string{"user_id", "style", "format", "constraints_json"}},
+		{table: "tasks", columns: []string{"task_id", "conversation_id", "goal", "phase", "step", "expected_action_kind", "expected_action", "status", "outcome", "last_error", "response_type", "version", "created_at", "updated_at"}},
 	}
 	for _, expected := range wantColumns {
 		table, columns := expected.table, expected.columns
@@ -91,6 +94,105 @@ func (s *ConversationStore) verify(ctx context.Context) error {
 		return errors.New("default conversation is missing; apply migrations with goose before starting")
 	}
 	return nil
+}
+
+var ErrTaskNotFound = errors.New("task not found")
+var ErrNoOpenTask = errors.New("no open task")
+
+func (s *ConversationStore) CreateTask(ctx context.Context, conversationID string) (domain.TaskState, error) {
+	if strings.TrimSpace(conversationID) == "" {
+		return domain.TaskState{}, errors.New("conversation id is required")
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO conversations (id) VALUES (?)`, conversationID); err != nil {
+		return domain.TaskState{}, err
+	}
+	state := domain.NewTaskState("task-" + uuid.NewV4().String())
+	state.ExpectedActionKind = domain.TaskActionKindAgent
+	_, err := s.db.ExecContext(ctx, `INSERT INTO tasks (task_id, conversation_id, phase, step, expected_action_kind, expected_action, status, outcome, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`, state.TaskID, conversationID, state.Phase, state.Step, state.ExpectedActionKind, state.ExpectedAction, state.Status, state.Outcome)
+	if err != nil {
+		return domain.TaskState{}, err
+	}
+	return s.GetTask(ctx, state.TaskID)
+}
+
+func (s *ConversationStore) GetOpenTask(ctx context.Context, conversationID string) (domain.TaskState, error) {
+	return s.getTask(ctx, `SELECT task_id, goal, phase, step, expected_action_kind, expected_action, status, outcome, last_error, response_type, version, updated_at FROM tasks WHERE conversation_id=? AND phase<>? ORDER BY updated_at DESC LIMIT 1`, conversationID, domain.TaskPhaseDone)
+}
+
+func (s *ConversationStore) GetLatestTask(ctx context.Context, conversationID string) (domain.TaskState, error) {
+	return s.getTask(ctx, `SELECT task_id, goal, phase, step, expected_action_kind, expected_action, status, outcome, last_error, response_type, version, updated_at FROM tasks WHERE conversation_id=? ORDER BY updated_at DESC LIMIT 1`, conversationID)
+}
+
+func (s *ConversationStore) GetTask(ctx context.Context, taskID string) (domain.TaskState, error) {
+	return s.getTask(ctx, `SELECT task_id, goal, phase, step, expected_action_kind, expected_action, status, outcome, last_error, response_type, version, updated_at FROM tasks WHERE task_id=?`, taskID)
+}
+
+func (s *ConversationStore) getTask(ctx context.Context, query string, args ...any) (domain.TaskState, error) {
+	var state domain.TaskState
+	var updated string
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&state.TaskID, &state.Goal, &state.Phase, &state.Step, &state.ExpectedActionKind, &state.ExpectedAction, &state.Status, &state.Outcome, &state.LastError, &state.ResponseType, &state.Version, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.TaskState{}, ErrTaskNotFound
+	}
+	if err != nil {
+		return domain.TaskState{}, err
+	}
+	state.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated)
+	if err != nil {
+		return domain.TaskState{}, err
+	}
+	return state, state.Validate()
+}
+
+func (s *ConversationStore) SaveTaskTransition(ctx context.Context, taskID, action string, from domain.TaskState, next domain.TaskState, expectedVersion int64) (domain.TaskState, error) {
+	if err := next.Validate(); err != nil {
+		return domain.TaskState{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.TaskState{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE tasks SET goal=?, phase=?, step=?, expected_action_kind=?, expected_action=?, status=?, outcome=?, last_error=?, response_type=?, version=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE task_id=? AND version=?`, next.Goal, next.Phase, next.Step, next.ExpectedActionKind, next.ExpectedAction, next.Status, next.Outcome, next.LastError, next.ResponseType, expectedVersion+1, taskID, expectedVersion)
+	if err != nil {
+		return domain.TaskState{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return domain.TaskState{}, err
+	}
+	if affected != 1 {
+		return domain.TaskState{}, ErrTaskStateVersionConflict
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_transition_events (task_id, action, from_phase, to_phase, from_status, to_status, step, expected_action) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, taskID, action, from.Phase, next.Phase, from.Status, next.Status, next.Step, next.ExpectedAction); err != nil {
+		return domain.TaskState{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.TaskState{}, err
+	}
+	return s.GetTask(ctx, taskID)
+}
+
+func (s *ConversationStore) ListTaskTransitions(ctx context.Context, taskID string) ([]domain.TaskTransition, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, action, from_phase, to_phase, from_status, to_status, step, expected_action, created_at FROM task_transition_events WHERE task_id=? ORDER BY id ASC`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]domain.TaskTransition, 0)
+	for rows.Next() {
+		var item domain.TaskTransition
+		var created string
+		if err := rows.Scan(&item.ID, &item.TaskID, &item.Action, &item.FromPhase, &item.ToPhase, &item.FromStatus, &item.ToStatus, &item.Step, &item.ExpectedAction, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *ConversationStore) SaveMemory(ctx context.Context, record memory.Record) error {
@@ -216,6 +318,44 @@ func (s *ConversationStore) AppendAssistant(ctx context.Context, conversationID,
 		return domain.ConversationEvent{}, err
 	}
 	return event, nil
+}
+
+func (s *ConversationStore) CommitAssistantAndTask(ctx context.Context, conversationID, turnID, content, snapshotID, taskID, action string, from, to domain.TaskState) (domain.ConversationEvent, domain.TaskState, error) {
+	if err := to.Validate(); err != nil {
+		return domain.ConversationEvent{}, domain.TaskState{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ConversationEvent{}, domain.TaskState{}, err
+	}
+	defer tx.Rollback()
+	event, err := insertEvent(ctx, tx, conversationID, turnID, domain.EventRoleAssistant, content, snapshotID)
+	if err != nil {
+		return domain.ConversationEvent{}, domain.TaskState{}, err
+	}
+	to.Version = from.Version + 1
+	result, err := tx.ExecContext(ctx, `UPDATE tasks SET goal=?, phase=?, step=?, expected_action_kind=?, expected_action=?, status=?, outcome=?, last_error=?, response_type=?, version=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE task_id=? AND version=?`, to.Goal, to.Phase, to.Step, to.ExpectedActionKind, to.ExpectedAction, to.Status, to.Outcome, to.LastError, to.ResponseType, to.Version, taskID, from.Version)
+	if err != nil {
+		return domain.ConversationEvent{}, domain.TaskState{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		if err != nil {
+			return domain.ConversationEvent{}, domain.TaskState{}, err
+		}
+		return domain.ConversationEvent{}, domain.TaskState{}, ErrTaskStateVersionConflict
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_transition_events (task_id, action, from_phase, to_phase, from_status, to_status, step, expected_action) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, taskID, action, from.Phase, to.Phase, from.Status, to.Status, to.Step, to.ExpectedAction); err != nil {
+		return domain.ConversationEvent{}, domain.TaskState{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.ConversationEvent{}, domain.TaskState{}, err
+	}
+	saved, err := s.GetTask(ctx, taskID)
+	if err != nil {
+		return domain.ConversationEvent{}, domain.TaskState{}, err
+	}
+	return event, saved, nil
 }
 
 func (s *ConversationStore) append(ctx context.Context, conversationID, turnID string, role domain.EventRole, content, snapshotID string) (domain.ConversationEvent, error) {

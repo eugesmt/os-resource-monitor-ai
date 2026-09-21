@@ -8,6 +8,24 @@ assert.match(source, /\/api\/ai\/profiles/);
 assert.match(source, /method: 'PUT'/);
 assert.match(source, /profileMenuButton/);
 assert.match(source, /addProfileButton/);
+assert.match(source, /\/api\/ai\/task\/state/);
+assert.match(source, /\/api\/ai\/task/);
+assert.match(source, /taskPauseBtn/);
+assert.match(source, /taskContinueBtn/);
+assert.match(source, /taskCancelBtn/);
+assert.match(source, /\/api\/ai\/task\/cancel/);
+assert.match(source, /setInterval\(\(\) =>/);
+assert.match(source, /Агент выполняет следующий шаг автоматически/);
+assert.match(source, /task_id: taskState\.task_id/);
+assert.match(source, /version: taskState\.version/);
+assert.match(source, /function taskAcceptsUserInput/);
+assert.match(source, /\$\('question'\)\.disabled = !acceptsInput/);
+assert.match(source, /if \(response\.status === 404\)/);
+assert.doesNotMatch(source, /taskAdvanceBtn/);
+assert.doesNotMatch(source, /taskSaveBtn/);
+assert.doesNotMatch(source, /taskResumeBtn/);
+assert.doesNotMatch(source, /taskRunBtn/);
+assert.doesNotMatch(source, /taskNewBtn/);
 assert.doesNotMatch(source, /localStorage/);
 const start = source.indexOf('function formatAIAnswer');
 const end = source.indexOf("$('askForm').addEventListener", start);
@@ -29,6 +47,27 @@ assert.match(rendered, /Гипотезы:/);
 assert.match(rendered, /Недостающие данные:/);
 assert.match(rendered, /Рекомендации:/);
 assert.doesNotMatch(rendered, /facts/i);
+
+const taskRenderStart = source.indexOf('function updateAskAvailability');
+const taskRenderMiddle = source.indexOf("$('question').addEventListener", taskRenderStart);
+const taskStateRenderStart = source.indexOf('function renderTaskState', taskRenderMiddle);
+const taskRenderEnd = source.indexOf('async function loadTaskState', taskRenderStart);
+assert.ok(taskRenderStart >= 0 && taskRenderMiddle > taskRenderStart && taskStateRenderStart > taskRenderMiddle && taskRenderEnd > taskStateRenderStart, 'task state rendering was not found');
+const taskElements = {};
+for (const id of ['question', 'sendBtn', 'taskStateCard', 'taskPhase', 'taskStep', 'taskExpectedAction', 'taskStateStatus', 'taskExpectedKind', 'taskPauseBtn', 'taskContinueBtn', 'taskCancelBtn']) {
+  taskElements[id] = { disabled: false, value: '', textContent: '', replaceChildren() {} };
+}
+const renderTaskState = new Function('$', `let aiBusy = false; let taskState = null; ${source.slice(taskRenderStart, taskRenderMiddle)}${source.slice(taskStateRenderStart, taskRenderEnd)}; return renderTaskState;`)(id => taskElements[id]);
+renderTaskState(null);
+assert.equal(taskElements.taskStateCard.hidden, true);
+renderTaskState({ task_id: 'task-1', phase: 'execution', status: 'paused', outcome: 'open', expected_action_kind: 'agent', step: 'collect', expected_action: 'wait', version: 2 });
+assert.equal(taskElements.taskStateCard.hidden, false);
+assert.equal(taskElements.question.disabled, true);
+assert.equal(taskElements.sendBtn.disabled, true);
+assert.equal(taskElements.taskContinueBtn.disabled, false);
+renderTaskState({ task_id: 'task-1', phase: 'execution', status: 'active', outcome: 'open', expected_action_kind: 'user', step: 'collect', expected_action: 'wait', version: 3 });
+assert.equal(taskElements.question.disabled, false);
+assert.equal(taskElements.sendBtn.disabled, false);
 
 const restoreStart = source.indexOf('async function restoreConversation');
 const restoreEnd = source.indexOf('function svgEl', restoreStart);
@@ -67,11 +106,10 @@ const restoreConversation = new Function('$', 'fetch', 'document', 'formatAIAnsw
 (async () => {
   await restoreConversation();
   assert.equal(fetchedURL, '/api/ai/history');
-  assert.deepEqual(chat.children.map((item) => item.className), ['message user', 'message ai', 'message ai', 'message user']);
+  assert.deepEqual(chat.children.map((item) => item.className), ['message user', 'message ai', 'message user']);
   assert.equal(chat.children[0].textContent, 'orphan question');
-  assert.match(chat.children[1].textContent, /restored/);
-  assert.match(chat.children[2].textContent, /повреждён/);
-  assert.equal(chat.children[3].textContent, 'question after malformed answer');
+  assert.match(chat.children[1].textContent, /повреждён/);
+  assert.equal(chat.children[2].textContent, 'question after malformed answer');
   console.log('web AI answer rendering and history restoration passed');
 })().catch((err) => {
   console.error(err);

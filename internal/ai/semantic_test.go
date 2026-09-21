@@ -8,6 +8,12 @@ import (
 	"taskmanager-ai/internal/domain"
 )
 
+func TestGeneralDomainSignalAcceptsMetricHistoryQuestion(t *testing.T) {
+	if !generalDomainSignal("Расшифруй каждую метрику из прошлого ответа", "os_monitoring", collector.SystemSnapshot{}) {
+		t.Fatal("metric history question must be recognized as OS monitoring")
+	}
+}
+
 func TestValidateDiagnosisGroundsMetricsAndPID(t *testing.T) {
 	pid := int32(42)
 	snapshot := collector.SystemSnapshot{CPUPercent: 50, Processes: []collector.ProcessInfo{{PID: pid, CPUPercent: 25}}}

@@ -30,6 +30,17 @@ type fakeCompletion struct {
 	before       func()
 }
 
+func TestGeneralAnswerAllowsDetailedMetricExplanation(t *testing.T) {
+	result := domain.AssistantResponseV2{
+		SchemaVersion: domain.AssistantSchemaVersion,
+		ResponseType:  domain.ResponseTypeGeneralAnswer,
+		GeneralAnswer: &domain.GeneralAnswerResponse{Answer: strings.Repeat("метрика ", 700), Topic: "os_monitoring"},
+	}
+	if err := validateAssistantResponseStructure(result, 16<<10); err != nil {
+		t.Fatalf("detailed general answer rejected: %v", err)
+	}
+}
+
 func TestParseAssistantResponseKeepsV2ParseError(t *testing.T) {
 	_, err := parseAssistantResponse(`{"assistant_schema_version":"assistant.v2","response_type":"general_answer","general_answer":{"answer":"GPU","topic":"gpu","unexpected":true}}`)
 	if err == nil || !strings.Contains(err.Error(), `unknown field "unexpected"`) {
@@ -367,6 +378,33 @@ func TestAgentFirstAndSecondTurnStructuredMessageOrder(t *testing.T) {
 	}
 	if !strings.Contains(completion.request.Messages[1].Content, "first question") || !strings.Contains(completion.request.Messages[2].Content, `\"summary\":\"answer\"`) || !strings.Contains(completion.request.Messages[3].Content, "second question") || !strings.Contains(completion.request.Messages[3].Content, "snap-2") {
 		t.Fatalf("second-turn messages = %#v", completion.request.Messages)
+	}
+}
+
+func TestAgentIncludesTaskStateForContinuation(t *testing.T) {
+	completion := &fakeCompletion{answer: `{"assistant_schema_version":"assistant.v2","response_type":"diagnosis","task_decision":{"action":"stay","phase":"execution","current_step":"run checks","expected_action_kind":"agent","expected_action":"wait for result"},"diagnosis":{"diagnosis_schema_version":"diagnosis.v1","status":"healthy","summary":"answer","observations":[],"hypotheses":[],"missing_data":[],"recommendations":[]}}`}
+	agent := newAgent(completion, "test system prompt", &recordingHistory{})
+	state := domain.TaskState{TaskID: "default", Phase: domain.TaskPhaseExecution, Step: "run checks", ExpectedActionKind: domain.TaskActionKindAgent, ExpectedAction: "wait for result", Status: domain.TaskStatusPaused, Outcome: domain.TaskOutcomeOpen, Version: 3}
+	agent.SetTaskState(&state)
+	if _, err := agent.AskWithSnapshot(context.Background(), "continue", freshSnapshot("snap-continue")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(completion.request.Messages[len(completion.request.Messages)-1].Content, "TASK_STATE") ||
+		!strings.Contains(completion.request.Messages[len(completion.request.Messages)-1].Content, "run checks") ||
+		!strings.Contains(completion.request.Messages[len(completion.request.Messages)-1].Content, "wait for result") {
+		t.Fatalf("continuation context = %q", completion.request.Messages[len(completion.request.Messages)-1].Content)
+	}
+}
+
+func TestTaskPlanningAcceptsGeneralPlanForGenericGoal(t *testing.T) {
+	state := domain.NewTaskState("task-plan")
+	result := domain.AssistantResponseV2{
+		SchemaVersion: domain.AssistantSchemaVersion,
+		ResponseType:  domain.ResponseTypeGeneralAnswer,
+		GeneralAnswer: &domain.GeneralAnswerResponse{Answer: "Составляю план.", Topic: "os_monitoring"},
+	}
+	if err := validateTaskAwareAssistantResponse(result, ContextEvidence{Question: "Продолжить"}, &state); err != nil {
+		t.Fatalf("planning response rejected: %v", err)
 	}
 }
 

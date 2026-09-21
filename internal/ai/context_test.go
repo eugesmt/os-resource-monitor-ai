@@ -46,6 +46,18 @@ func TestDefaultSystemPromptDefinesCanonicalMissingDataAndDerivedGPUMetric(t *te
 	}
 }
 
+func TestDefaultSystemPromptRequiresAssistantEnvelopeAndCodeOwnedTaskState(t *testing.T) {
+	for _, want := range []string{
+		`"assistant_schema_version" со значением "assistant.v2"`,
+		`НИКОГДА не возвращай diagnosis.v1 object в корне`,
+		`переходы planning, execution, validation и done выполняет код`,
+	} {
+		if !strings.Contains(DefaultSystemPrompt, want) {
+			t.Fatalf("system prompt missing task envelope rule %q", want)
+		}
+	}
+}
+
 func TestProjectSnapshotSelectsTopCPUAndMemoryProcesses(t *testing.T) {
 	processes := make([]collector.ProcessInfo, 25)
 	for i := range processes {

@@ -3,6 +3,8 @@ let history = [];
 let aiBusy = false;
 let events = null;
 let profileLibrary = {};
+let taskState = null;
+let renderedTaskResultID = '';
 
 const COLORS = { grid: '#24303c', label: '#738095', cpu: '#79a9ec', mem: '#8fd1b0' };
 
@@ -221,18 +223,25 @@ async function restoreConversation() {
   const payload = await response.json();
   const items = Array.isArray(payload.items) ? payload.items : [];
   $('chat').replaceChildren();
-  for (const item of items) {
-    if (item.role === 'user') {
-      addMessage('user', String(item.content || ''));
-      continue;
-    }
-    if (item.role !== 'assistant') continue;
+  let latestAssistant = null;
+  const renderLatestAssistant = () => {
+    if (!latestAssistant) return;
     try {
-      addMessage('ai', formatAIAnswer(JSON.parse(item.content)));
+      addMessage('ai', formatAIAnswer(JSON.parse(latestAssistant.content)));
     } catch {
       addMessage('ai', 'Сохранённый ответ AI повреждён и не может быть показан.');
     }
+    latestAssistant = null;
+  };
+  for (const item of items) {
+    if (item.role === 'user') {
+      renderLatestAssistant();
+      addMessage('user', String(item.content || ''));
+      continue;
+    }
+    if (item.role === 'assistant') latestAssistant = item;
   }
+  renderLatestAssistant();
 }
 
 function addMessage(role, text) {
@@ -405,7 +414,7 @@ function formatAIAnswer(answer) {
 
 $('askForm').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (aiBusy) return;
+  if (aiBusy || !taskAcceptsUserInput()) return;
   const question = $('question').value.trim();
   if (!question) return;
   aiBusy = true;
@@ -421,17 +430,33 @@ $('askForm').addEventListener('submit', async (event) => {
       body: JSON.stringify({ question }),
     });
     const payload = await response.json();
+    if (payload.task_state) renderTaskState(payload.task_state);
     if (!response.ok) throw new Error(payload.error || 'AI request failed');
-    addMessage('ai', formatAIAnswer(payload.answer));
+    if (payload.answer) addMessage('ai', formatAIAnswer(payload.answer));
   } catch (error) {
     $('aiError').textContent = error instanceof Error ? error.message : 'Не удалось получить ответ AI';
   } finally {
     aiBusy = false;
-    $('sendBtn').disabled = false;
+    updateAskAvailability();
     $('sendBtn').textContent = 'Спросить';
     $('question').focus();
   }
 });
+
+function updateAskAvailability() {
+  const acceptsInput = taskAcceptsUserInput();
+  $('question').disabled = !acceptsInput;
+  $('sendBtn').disabled = aiBusy || !acceptsInput;
+}
+
+function taskAcceptsUserInput() {
+  if (!taskState || taskState.phase === 'done') return true;
+  return taskState.status === 'active' && taskState.expected_action_kind === 'user';
+}
+
+function taskPhaseLabel(phase) {
+  return { planning: 'Планирование', execution: 'Выполнение', validation: 'Проверка', done: 'Готово' }[phase] || phase;
+}
 
 $('question').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) {
@@ -439,6 +464,97 @@ $('question').addEventListener('keydown', (event) => {
     $('askForm').requestSubmit();
   }
 });
+
+function renderTaskState(state) {
+  taskState = state;
+  if (!state) {
+    $('taskStateCard').hidden = true;
+    $('taskPhase').value = 'planning';
+    $('taskStep').value = '';
+    $('taskExpectedAction').value = '';
+    $('taskStateStatus').textContent = 'Задача ещё не начата';
+    $('taskPauseBtn').disabled = true;
+    $('taskContinueBtn').disabled = true;
+    $('taskCancelBtn').disabled = true;
+    $('taskExpectedKind').textContent = 'Введите цель задачи, чтобы начать выполнение.';
+    $('question').placeholder = 'Опишите задачу, которую нужно выполнить…';
+    updateAskAvailability();
+    return;
+  }
+  $('taskStateCard').hidden = false;
+  $('taskPhase').value = state.phase || 'planning';
+  $('taskStep').value = state.step || '';
+  $('taskExpectedAction').value = state.expected_action || '';
+  const lifecycle = state.phase === 'done' ? (state.outcome === 'cancelled' ? 'отменена' : 'завершена') : (state.status === 'paused' ? (state.last_error ? 'остановлена из-за ошибки' : 'на паузе') : 'в работе');
+  $('taskStateStatus').textContent = `${taskPhaseLabel(state.phase)} · ${lifecycle}`;
+  const expectation = { agent: 'Агент выполняет следующий шаг автоматически. Можно поставить задачу на паузу.', user: 'Ответьте на вопрос агента в поле ввода ниже.', tool: 'Агент ожидает результат инструмента. Можно поставить задачу на паузу.', none: 'Задача завершена.' };
+  $('taskExpectedKind').textContent = state.last_error || expectation[state.expected_action_kind] || '';
+  $('taskPauseBtn').disabled = state.status !== 'active' || state.phase === 'done';
+  $('taskContinueBtn').disabled = state.status !== 'paused' || state.phase === 'done';
+  $('taskCancelBtn').disabled = state.phase === 'done';
+  $('question').placeholder = state.expected_action_kind === 'user' ? 'Введите ответ для продолжения задачи…' : 'Ожидание следующего действия агента…';
+  updateAskAvailability();
+}
+
+async function loadTaskState() {
+  const response = await fetch('/api/ai/task/state', { cache: 'no-store' });
+  const payload = await response.json();
+  if (response.status === 404) {
+    renderTaskState(null);
+    return;
+  }
+  if (!response.ok) throw new Error(payload.error || 'Не удалось загрузить состояние задачи');
+  renderTaskState(payload);
+}
+
+async function showCompletedTaskResult() {
+  if (!taskState || taskState.phase !== 'done' || taskState.outcome !== 'completed' || renderedTaskResultID === taskState.task_id) return;
+  const response = await fetch('/api/ai/task/result', { cache: 'no-store' });
+  const payload = await response.json();
+  if (!response.ok || !payload.content) return;
+  try {
+    addMessage('ai', formatAIAnswer(JSON.parse(payload.content)));
+    renderedTaskResultID = taskState.task_id;
+  } catch {
+    addMessage('ai', String(payload.content));
+    renderedTaskResultID = taskState.task_id;
+  }
+}
+
+async function changeTaskState(action) {
+  if (!taskState) throw new Error('Задача ещё не начата');
+  $('taskStateError').textContent = '';
+  const response = await fetch('/api/ai/task/state', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, task_id: taskState.task_id, version: taskState.version }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось изменить состояние задачи');
+  renderTaskState(payload);
+}
+
+async function continueTask() {
+  if (!taskState) throw new Error('Задача ещё не начата');
+  if (taskState.status !== 'paused') return;
+  await changeTaskState('resume');
+}
+
+async function cancelTask() {
+  if (!taskState) throw new Error('Задача ещё не начата');
+  const response = await fetch('/api/ai/task/cancel', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task_id: taskState.task_id, version: taskState.version }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось отменить задачу');
+  renderTaskState(payload);
+}
+
+if ($('taskPauseBtn')) {
+  $('taskContinueBtn').addEventListener('click', () => continueTask().catch((error) => { $('taskStateError').textContent = error.message; }));
+  $('taskPauseBtn').addEventListener('click', () => changeTaskState('pause').catch((error) => { $('taskStateError').textContent = error.message; }));
+	$('taskCancelBtn').addEventListener('click', () => cancelTask().catch((error) => { $('taskStateError').textContent = error.message; }));
+}
 
 function fillProfile(profile) {
   $('profileUserID').value = profile?.user_id || '';
@@ -530,6 +646,7 @@ if ($('profileForm')) {
     $('profileError').textContent = '';
     try {
       await activateProfile(profileLibrary[button.dataset.profileId]);
+      await loadTaskState();
       await restoreConversation();
       await loadMemory();
       closeProfileMenu();
@@ -568,6 +685,7 @@ if ($('profileForm')) {
         format: $('profileFormat').value.trim(),
         constraints,
       });
+      await loadTaskState();
       await restoreConversation();
       await loadMemory();
       $('profileStatus').textContent = 'Профиль сохранён';
@@ -684,13 +802,19 @@ window.addEventListener('resize', () => drawChart(history));
   try {
     await loadInitialState();
     await loadProfile();
+    await loadTaskState();
     await restoreConversation();
     await loadMemory();
   } catch {
     setStatus('bad', 'Нет связи с сервером');
     $('aiError').textContent = 'Не удалось восстановить историю диалога.';
   } finally {
-    $('sendBtn').disabled = false;
+    updateAskAvailability();
   }
   subscribe();
+  setInterval(() => {
+    if (taskState && taskState.phase !== 'done') {
+      loadTaskState().then(showCompletedTaskResult).catch(() => {});
+    }
+  }, 1000);
 })();

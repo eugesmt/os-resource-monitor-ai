@@ -65,6 +65,90 @@ func migratedConversationDB(t *testing.T) string {
 		_ = db.Close()
 		t.Fatalf("apply profiles migration: %v", err)
 	}
+	taskMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920230000_task_states.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read task state migration: %v", err)
+	}
+	taskUp, _, ok := strings.Cut(string(taskMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("task state migration has no Down marker")
+	}
+	if _, err := db.Exec(taskUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply task state migration: %v", err)
+	}
+	newTasksMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920240000_tasks.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read tasks migration: %v", err)
+	}
+	newTasksUp, _, ok := strings.Cut(string(newTasksMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("tasks migration has no Down marker")
+	}
+	if _, err := db.Exec(newTasksUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply tasks migration: %v", err)
+	}
+	taskOutcomeMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920250000_task_outcome.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read task outcome migration: %v", err)
+	}
+	taskOutcomeUp, _, ok := strings.Cut(string(taskOutcomeMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("task outcome migration has no Down marker")
+	}
+	if _, err := db.Exec(taskOutcomeUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply task outcome migration: %v", err)
+	}
+	taskErrorMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920260000_task_last_error.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read task error migration: %v", err)
+	}
+	taskErrorUp, _, ok := strings.Cut(string(taskErrorMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("task error migration has no Down marker")
+	}
+	if _, err := db.Exec(taskErrorUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply task error migration: %v", err)
+	}
+	taskResponseTypeMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920270000_task_response_type.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read task response type migration: %v", err)
+	}
+	taskResponseTypeUp, _, ok := strings.Cut(string(taskResponseTypeMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("task response type migration has no Down marker")
+	}
+	if _, err := db.Exec(taskResponseTypeUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply task response type migration: %v", err)
+	}
+	taskGoalMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920280000_task_goal.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read task goal migration: %v", err)
+	}
+	taskGoalUp, _, ok := strings.Cut(string(taskGoalMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("task goal migration has no Down marker")
+	}
+	if _, err := db.Exec(taskGoalUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply task goal migration: %v", err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close migration database: %v", err)
 	}
@@ -123,6 +207,121 @@ func TestConversationStoreListRecentEventsBoundedBeforeCursorAndReopen(t *testin
 	}
 	if !reflect.DeepEqual(compiledAfter, compiledBefore) {
 		t.Fatalf("compiled context changed after reopen:\nbefore=%#v\nafter=%#v", compiledBefore, compiledAfter)
+	}
+}
+
+func TestConversationStoreCreatesDistinctTasksAndReusesConversation(t *testing.T) {
+	store, _ := openConversationTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	first, err := store.CreateTask(ctx, DefaultConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateTask(ctx, DefaultConversationID); err == nil {
+		t.Fatal("second open task was accepted")
+	}
+	done, err := first.Apply(domain.TaskActionAdvance, domain.TaskPhaseExecution, "execute", "validate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err = store.SaveTaskTransition(ctx, first.TaskID, "advance", first, done, first.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err = done.ApplyDecision(domain.TaskDecision{Action: domain.TaskDecisionAdvance, Phase: domain.TaskPhaseValidation, Step: "validate", ExpectedActionKind: domain.TaskActionKindUser, ExpectedAction: "confirm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validated, err := store.SaveTaskTransition(ctx, first.TaskID, "advance", done, done, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, err := validated.ApplyDecision(domain.TaskDecision{Action: domain.TaskDecisionComplete})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err = store.SaveTaskTransition(ctx, first.TaskID, "complete", validated, finished, validated.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateTask(ctx, DefaultConversationID); err != nil {
+		t.Fatal("new task after non-terminal task failed: ", err)
+	}
+	if done.TaskID != first.TaskID || done.Phase != domain.TaskPhaseDone {
+		t.Fatalf("completed task = %#v", done)
+	}
+	latest, err := store.GetOpenTask(ctx, DefaultConversationID)
+	if err != nil || latest.TaskID == first.TaskID {
+		t.Fatalf("open task = %#v, err=%v", latest, err)
+	}
+}
+
+func TestConversationStoreReopensPausedTaskCheckpoint(t *testing.T) {
+	store, path := openConversationTestStore(t)
+	ctx := context.Background()
+	created, err := store.CreateTask(ctx, DefaultConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := created.ApplyDecision(domain.TaskDecision{Action: domain.TaskDecisionStay, Phase: domain.TaskPhasePlanning, Step: "собрать данные", ExpectedActionKind: domain.TaskActionKindTool, ExpectedAction: "дождаться результатов инструмента"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err = store.SaveTaskTransition(ctx, created.TaskID, "stay", created, planned, created.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err := planned.Apply(domain.TaskActionPause, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err = store.SaveTaskTransition(ctx, planned.TaskID, "pause", planned, paused, planned.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenConversationStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.GetOpenTask(ctx, DefaultConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TaskID != paused.TaskID || got.Phase != paused.Phase || got.Status != domain.TaskStatusPaused || got.Step != paused.Step || got.ExpectedActionKind != paused.ExpectedActionKind || got.ExpectedAction != paused.ExpectedAction || got.Version != paused.Version {
+		t.Fatalf("reopened checkpoint = %#v, want %#v", got, paused)
+	}
+}
+
+func TestConversationStoreCommitsAssistantAndTaskAtomically(t *testing.T) {
+	store, _ := openConversationTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	task, err := store.CreateTask(ctx, DefaultConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendUser(ctx, DefaultConversationID, "turn-task", "start task", "snap-task"); err != nil {
+		t.Fatal(err)
+	}
+	next, err := task.ApplyDecision(domain.TaskDecision{Action: domain.TaskDecisionAdvance, Phase: domain.TaskPhaseExecution, Step: "execute", ExpectedActionKind: domain.TaskActionKindAgent, ExpectedAction: "run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, committed, err := store.CommitAssistantAndTask(ctx, DefaultConversationID, "turn-task", `{"assistant_schema_version":"assistant.v2"}`, "snap-task", task.TaskID, "advance", task, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assistant.Role != domain.EventRoleAssistant || committed.Phase != domain.TaskPhaseExecution || committed.Version != task.Version+1 {
+		t.Fatalf("assistant=%#v committed=%#v", assistant, committed)
+	}
+	events, err := store.ListEvents(ctx, DefaultConversationID)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("events=%#v err=%v", events, err)
 	}
 }
 

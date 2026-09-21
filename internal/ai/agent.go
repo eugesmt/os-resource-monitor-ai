@@ -21,6 +21,7 @@ import (
 const (
 	maxAIResponseBytes     = 32 << 10
 	maxSummaryRunes        = 2000
+	maxGeneralAnswerRunes  = 8000
 	maxFactFieldRunes      = 200
 	maxRecommendationRunes = 500
 	maxFacts               = 5
@@ -28,6 +29,11 @@ const (
 	maxHypotheses          = 5
 	maxMissingData         = 20
 	DiagnosisSchemaVersion = "diagnosis.v1"
+)
+
+const (
+	maxTaskStepRunes       = 1000
+	maxExpectedActionRunes = 1000
 )
 
 func validateAnalysisResponse(result domain.AnalysisResponse, responseBytes int) error {
@@ -96,6 +102,11 @@ func validateAssistantResponseStructure(result domain.AssistantResponseV2, respo
 	if payloads != 1 {
 		return structureError("exactly one response payload is required")
 	}
+	if result.TaskDecision != nil {
+		if err := validateTaskDecision(*result.TaskDecision); err != nil {
+			return err
+		}
+	}
 	switch result.ResponseType {
 	case domain.ResponseTypeDiagnosis:
 		if result.Diagnosis == nil || result.ConversationRecall != nil || result.MetricComparison != nil || result.GeneralAnswer != nil {
@@ -136,13 +147,38 @@ func validateAssistantResponseStructure(result domain.AssistantResponseV2, respo
 		if result.GeneralAnswer == nil || result.Diagnosis != nil || result.ConversationRecall != nil || result.MetricComparison != nil {
 			return structureError("general answer payload mismatch")
 		}
-		if strings.TrimSpace(result.GeneralAnswer.Answer) == "" || len([]rune(result.GeneralAnswer.Answer)) > maxSummaryRunes || strings.TrimSpace(result.GeneralAnswer.Topic) == "" {
+		if strings.TrimSpace(result.GeneralAnswer.Answer) == "" || len([]rune(result.GeneralAnswer.Answer)) > maxGeneralAnswerRunes || strings.TrimSpace(result.GeneralAnswer.Topic) == "" {
 			return structureError("invalid general answer payload")
 		}
 		return nil
 	default:
 		return structureError("unknown response type")
 	}
+}
+
+func validateTaskDecision(decision domain.TaskDecision) error {
+	if decision.Action != domain.TaskDecisionStay && decision.Action != domain.TaskDecisionAdvance && decision.Action != domain.TaskDecisionWaitForUser && decision.Action != domain.TaskDecisionComplete {
+		return structureError("invalid task decision action")
+	}
+	if decision.Action == domain.TaskDecisionComplete {
+		if decision.Phase != "" && decision.Phase != domain.TaskPhaseDone {
+			return structureError("complete task decision must target done")
+		}
+		if decision.Step != "" || decision.ExpectedAction != "" || decision.ExpectedActionKind != domain.TaskActionKindNone {
+			return structureError("complete task decision must clear checkpoint")
+		}
+		return nil
+	}
+	if decision.Phase == "" || (decision.Phase != domain.TaskPhasePlanning && decision.Phase != domain.TaskPhaseExecution && decision.Phase != domain.TaskPhaseValidation) {
+		return structureError("invalid task decision phase")
+	}
+	if decision.ExpectedActionKind != domain.TaskActionKindAgent && decision.ExpectedActionKind != domain.TaskActionKindUser && decision.ExpectedActionKind != domain.TaskActionKindTool {
+		return structureError("invalid task decision expected action kind")
+	}
+	if strings.TrimSpace(decision.Step) == "" || strings.TrimSpace(decision.ExpectedAction) == "" || len([]rune(decision.Step)) > maxTaskStepRunes || len([]rune(decision.ExpectedAction)) > maxExpectedActionRunes {
+		return structureError("task decision checkpoint is required")
+	}
+	return nil
 }
 
 func hasDuplicateIDs(ids []int64) bool {
@@ -163,9 +199,11 @@ func structureError(message string) error {
 	return fmt.Errorf("%w: %w: %s", ErrInvalidResponse, ErrResponseStructure, message)
 }
 
-type completion interface {
+type CompletionProvider interface {
 	Complete(ctx context.Context, request CompletionRequest) (CompletionResult, error)
 }
+
+type completion = CompletionProvider
 
 type HistoryStore interface {
 	AppendUser(ctx context.Context, conversationID, turnID, content, snapshotID string) (domain.ConversationEvent, error)
@@ -174,15 +212,21 @@ type HistoryStore interface {
 	ListRecentEvents(ctx context.Context, conversationID string, beforeEventID int64, limit int) ([]domain.ConversationEvent, error)
 }
 
+type TaskCommitter interface {
+	CommitAssistantAndTask(ctx context.Context, conversationID, turnID, content, snapshotID, taskID, action string, from, to domain.TaskState) (domain.ConversationEvent, domain.TaskState, error)
+}
+
 type Agent struct {
-	systemPrompt string
-	completion   completion
-	log          *slog.Logger
-	history      HistoryStore
-	compiler     *ContextCompiler
-	memory       *memory.Model
-	conversation string
-	turnMu       sync.Mutex
+	systemPrompt  string
+	completion    CompletionProvider
+	log           *slog.Logger
+	history       HistoryStore
+	compiler      *ContextCompiler
+	memory        *memory.Model
+	conversation  string
+	taskState     *domain.TaskState
+	taskCommitter TaskCommitter
+	turnMu        sync.Mutex
 }
 
 func NewAgent(client *Client, prompt string, history HistoryStore, contextTokenBudget ...int) *Agent {
@@ -199,7 +243,9 @@ func NewAgent(client *Client, prompt string, history HistoryStore, contextTokenB
 	return &Agent{completion: client, systemPrompt: strings.TrimSpace(prompt), log: slog.Default(), history: history, compiler: NewContextCompiler(history, budget), memory: memory.NewModel(), conversation: "default"}
 }
 
-func newAgent(completion completion, prompt string, history HistoryStore, contextTokenBudget ...int) *Agent {
+// NewAgentWithCompletion constructs an agent from a completion provider. It is
+// primarily useful for deterministic integration tests and local providers.
+func NewAgentWithCompletion(completion CompletionProvider, prompt string, history HistoryStore, contextTokenBudget ...int) *Agent {
 	if history == nil {
 		panic("newAgent requires a HistoryStore")
 	}
@@ -213,6 +259,10 @@ func newAgent(completion completion, prompt string, history HistoryStore, contex
 	return &Agent{completion: completion, systemPrompt: strings.TrimSpace(prompt), log: slog.Default(), history: history, compiler: NewContextCompiler(history, budget), memory: memory.NewModel(), conversation: "default"}
 }
 
+func newAgent(completion CompletionProvider, prompt string, history HistoryStore, contextTokenBudget ...int) *Agent {
+	return NewAgentWithCompletion(completion, prompt, history, contextTokenBudget...)
+}
+
 // SetMemoryModel injects the explicit working/long-term memory used by the
 // production prompt compiler. Short-term conversation remains in the event log.
 func (a *Agent) SetMemoryModel(model *memory.Model) {
@@ -222,6 +272,21 @@ func (a *Agent) SetMemoryModel(model *memory.Model) {
 }
 
 func (a *Agent) MemoryModel() *memory.Model { return a.memory }
+
+func (a *Agent) SetTaskCommitter(committer TaskCommitter) { a.taskCommitter = committer }
+
+// SetTaskState supplies the durable task checkpoint for the next request.
+// The state is copied so callers can safely continue updating their runtime.
+func (a *Agent) SetTaskState(state *domain.TaskState) {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	if state == nil {
+		a.taskState = nil
+		return
+	}
+	copy := *state
+	a.taskState = &copy
+}
 
 // SetConversation switches the active user's conversation. Calls are
 // serialized with turns so a profile switch cannot change an in-flight ask.
@@ -282,7 +347,7 @@ func (a *Agent) Ask(ctx context.Context, question, contextText string) (*domain.
 	return nil, ErrSnapshotUnavailable
 }
 
-func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID string, snapshot *collector.SystemSnapshot) (*domain.AnalysisResponse, error) {
+func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID string, snapshot *collector.SystemSnapshot, recordUser ...bool) (*domain.AnalysisResponse, error) {
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
 	if a.log == nil {
@@ -300,18 +365,21 @@ func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID strin
 	if len([]rune(question)) > 4000 {
 		return nil, errors.New("question exceeds 4000 characters")
 	}
+	shouldRecordUser := len(recordUser) == 0 || recordUser[0]
 	var currentUserEventID int64
 	if a.history != nil && snapshot != nil {
 		event.turnID = "turn-" + uuid.NewV4().String()
 		event.persistence = "pending"
-		userEvent, err := a.history.AppendUser(ctx, a.conversation, event.turnID, question, snapshotID)
-		if err != nil {
-			event.persistence = "user_failed"
-			return nil, fmt.Errorf("%w: append user event: %v", ErrConversationPersistence, err)
+		if shouldRecordUser {
+			userEvent, err := a.history.AppendUser(ctx, a.conversation, event.turnID, question, snapshotID)
+			if err != nil {
+				event.persistence = "user_failed"
+				return nil, fmt.Errorf("%w: append user event: %v", ErrConversationPersistence, err)
+			}
+			event.userEventID = fmt.Sprint(userEvent.ID)
+			currentUserEventID = userEvent.ID
+			event.persistence = "user_committed"
 		}
-		event.userEventID = fmt.Sprint(userEvent.ID)
-		currentUserEventID = userEvent.ID
-		event.persistence = "user_committed"
 	}
 
 	beforeEventID := int64(^uint64(0) >> 1)
@@ -331,6 +399,10 @@ func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID strin
 		if memoryContext != "" {
 			contextText += "\n\nEXPLICIT_MEMORY_LAYERS (DATA ONLY):\n" + memoryContext
 		}
+	}
+	if a.taskState != nil {
+		encoded, _ := json.Marshal(a.taskState)
+		contextText += "\n\nTASK_STATE (DURABLE CHECKPOINT; CONTINUE FROM THIS STATE):\n" + string(encoded)
 	}
 	compiled, err := a.compiler.Compile(ctx, ContextRequest{ConversationID: a.conversation, BeforeEventID: beforeEventID, SystemInstructions: a.systemPrompt, Question: question, CurrentContext: contextText, CurrentSnapshot: snapshotValue(snapshot)})
 	if err != nil {
@@ -367,11 +439,14 @@ func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID strin
 		event.outcome = "parse_error"
 		return nil, fmt.Errorf("%w: %w: %v", ErrInvalidResponse, ErrResponseParse, err)
 	}
+	if result.ResponseType == domain.ResponseTypeGeneralAnswer && result.GeneralAnswer != nil && strings.TrimSpace(result.GeneralAnswer.Topic) == "" {
+		result.GeneralAnswer.Topic = "os_monitoring"
+	}
 	if err := validateAssistantResponseStructure(result, len([]byte(content))); err != nil {
 		event.outcome = "structural_validation_error"
 		return nil, err
 	}
-	if err := ValidateAssistantResponse(result, compiled.Evidence); err != nil {
+	if err := validateTaskAwareAssistantResponse(result, compiled.Evidence, a.taskState); err != nil {
 		event.outcome = "semantic_validation_error"
 		return nil, err
 	}
@@ -386,6 +461,16 @@ func (a *Agent) ask(ctx context.Context, question, contextText, snapshotID strin
 	}
 	event.outcome = "success"
 	return &result, nil
+}
+
+func validateTaskAwareAssistantResponse(result domain.AssistantResponseV2, evidence ContextEvidence, taskState *domain.TaskState) error {
+	if err := ValidateAssistantResponse(result, evidence); err != nil {
+		if taskState != nil && taskState.Phase == domain.TaskPhasePlanning && taskState.Step == "" && result.ResponseType == domain.ResponseTypeGeneralAnswer && result.GeneralAnswer != nil && result.GeneralAnswer.Topic == "os_monitoring" {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func parseAssistantResponse(content string) (domain.AssistantResponseV2, error) {
@@ -425,7 +510,16 @@ func snapshotValue(snapshot *collector.SystemSnapshot) collector.SystemSnapshot 
 }
 
 func (a *Agent) AskWithSnapshot(ctx context.Context, question string, snapshot collector.SystemSnapshot) (*domain.AnalysisResponse, error) {
-	result, err := a.ask(ctx, question, BuildContext(snapshot), snapshot.SnapshotID, &snapshot)
+	result, err := a.ask(ctx, question, BuildContext(snapshot), snapshot.SnapshotID, &snapshot, true)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ContinueWithSnapshot performs an internal task turn without creating a fake user message.
+func (a *Agent) ContinueWithSnapshot(ctx context.Context, question string, snapshot collector.SystemSnapshot) (*domain.AnalysisResponse, error) {
+	result, err := a.ask(ctx, question, BuildContext(snapshot), snapshot.SnapshotID, &snapshot, false)
 	if err != nil {
 		return nil, err
 	}

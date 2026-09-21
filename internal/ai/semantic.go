@@ -126,7 +126,7 @@ func generalDomainSignal(question, topic string, snapshot collector.SystemSnapsh
 	if strings.Contains(text, strings.ToLower(topic)) {
 		return true
 	}
-	terms := []string{"ос", "система", "мониторинг", "нагруз", "ядр", "процесс", "cpu", "процессор", "gpu", "видеокарт", "cuda", "nvidia", "памят", "memory", "ram", "swap", "диск", "disk", "файл", "network", "сеть", "интерфейс", "драйвер", "driver", "температур"}
+	terms := []string{"ос", "система", "мониторинг", "метрик", "метрика", "нагруз", "простой", "idle", "ядр", "процесс", "cpu", "процессор", "gpu", "видеокарт", "cuda", "nvidia", "памят", "memory", "ram", "swap", "диск", "disk", "файл", "network", "сеть", "интерфейс", "драйвер", "driver", "температур"}
 	for _, term := range terms {
 		if strings.Contains(text, term) {
 			return true

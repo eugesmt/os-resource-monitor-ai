@@ -135,6 +135,19 @@
       <div id="chat" class="chat" aria-live="polite">
         <div class="message ai">Привет. Я вижу текущие метрики этой машины. Например, спроси: «Почему сейчас высокая загрузка CPU?»</div>
       </div>
+      <div id="taskStateCard" class="task-state" aria-labelledby="taskStateTitle" hidden>
+        <div class="task-state-head">
+          <div><h3 id="taskStateTitle">Состояние задачи</h3><div id="taskStateStatus" class="panel-hint">Загрузка…</div></div>
+          <div class="task-state-actions"><button id="taskPauseBtn" type="button">Пауза</button><button id="taskContinueBtn" type="button">Возобновить</button><button id="taskCancelBtn" type="button">Отменить</button></div>
+        </div>
+        <div class="task-state-fields">
+          <label>Этап<select id="taskPhase" disabled><option value="planning">planning</option><option value="execution">execution</option><option value="validation">validation</option><option value="done">done</option></select></label>
+          <label>Текущий шаг<input id="taskStep" readonly maxlength="1000" placeholder="Что сейчас выполняется"></label>
+          <label>Ожидаемое действие<input id="taskExpectedAction" readonly maxlength="1000" placeholder="Что нужно сделать дальше"></label>
+        </div>
+        <div id="taskExpectedKind" class="panel-hint"></div>
+        <div id="taskStateError" class="error" role="alert"></div>
+      </div>
       <form id="askForm" class="ask-form">
         <textarea id="question" maxlength="4000" rows="2" placeholder="Задайте вопрос о состоянии системы…"></textarea>
         <button id="sendBtn" type="submit" disabled>Спросить</button>

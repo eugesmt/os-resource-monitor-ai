@@ -84,6 +84,14 @@ th:nth-child(3), th:nth-child(4), td:nth-child(3), td:nth-child(4) { width: 90px
 .message { max-width: min(900px, 90%); padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .message.user { align-self: flex-end; background: #243141; }
 .message.ai { align-self: flex-start; background: #111922; border: 1px solid #273441; }
+.task-state { margin: 14px 0; padding: 14px; border: 1px solid #25313d; border-radius: 12px; background: #0f161e; }
+.task-state[hidden] { display: none; }
+.task-state-head, .task-state-actions, .task-state-fields { display: flex; gap: 10px; align-items: end; }
+.task-state-head { justify-content: space-between; align-items: start; }
+.task-state-fields { margin: 12px 0; flex-wrap: wrap; }
+.task-state-fields label { display: grid; gap: 5px; flex: 1 1 180px; color: #9aa7b8; font-size: 12px; }
+.task-state h3 { margin: 0 0 4px; }
+.task-state .error { margin-top: 8px; }
 .ask-form { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: stretch; }
 .profile-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .profile-form label { display: grid; gap: 6px; color: #9aa7b8; font-size: 12px; }
