@@ -41,6 +41,7 @@ func main() {
 
 	c := collector.New(cfg.MaxProcesses, logger)
 	runtime := server.NewRuntime(c, storage.NewRingBuffer(cfg.HistorySize), logger)
+	runtime.SetMetricsStore(conversationStore)
 	runtime.SetHistoryStore(conversationStore)
 	runtime.SetTaskStateStore(conversationStore)
 	if err := runtime.SetMemoryStore(ctx, conversationStore); err != nil {

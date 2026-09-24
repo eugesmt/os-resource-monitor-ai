@@ -1,6 +1,7 @@
 .PHONY: run db-up test race vet build tidy
 
-CONTEXT_DB_PATH ?= taskmanager-context.db
+CONTEXT_DB_PATH ?=memory-test.db
+
 export CONTEXT_DB_PATH
 
 db-up:

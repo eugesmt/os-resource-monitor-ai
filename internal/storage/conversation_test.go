@@ -178,6 +178,20 @@ func migratedConversationDB(t *testing.T) string {
 		_ = db.Close()
 		t.Fatalf("apply task invariant migration: %v", err)
 	}
+	metricsMigration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "20260920310000_metric_history.sql"))
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("read metrics migration: %v", err)
+	}
+	metricsUp, _, ok := strings.Cut(string(metricsMigration), "-- +goose Down")
+	if !ok {
+		_ = db.Close()
+		t.Fatal("metrics migration has no Down marker")
+	}
+	if _, err := db.Exec(metricsUp); err != nil {
+		_ = db.Close()
+		t.Fatalf("apply metrics migration: %v", err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close migration database: %v", err)
 	}

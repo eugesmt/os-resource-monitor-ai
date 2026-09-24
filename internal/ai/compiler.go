@@ -213,6 +213,7 @@ func (c *ContextCompiler) Compile(ctx context.Context, input any, legacyArgs ...
 	selectedMessages := make([]ModelMessage, 0, len(events))
 	for i := len(groups) - 1; i >= 0; i-- {
 		groupMessages := make([]ModelMessage, 0, len(groups[i]))
+		candidateIDs := make([]int64, 0, len(groups[i])+len(selectedMessages))
 		for _, event := range groups[i] {
 			message := c.renderer.Historical(event)
 			if event.Role == domain.EventRoleAssistant {
@@ -222,12 +223,18 @@ func (c *ContextCompiler) Compile(ctx context.Context, input any, legacyArgs ...
 				}
 			}
 			groupMessages = append(groupMessages, message)
+			candidateIDs = append(candidateIDs, event.ID)
+		}
+		for _, selectedGroup := range selectedGroups {
+			for _, event := range selectedGroup {
+				candidateIDs = append(candidateIDs, event.ID)
+			}
 		}
 		candidateHistory := append(append([]ModelMessage(nil), groupMessages...), selectedMessages...)
 		candidate := make([]ModelMessage, 0, len(candidateHistory)+2)
 		candidate = append(candidate, systemMessage)
 		candidate = append(candidate, candidateHistory...)
-		candidate = append(candidate, currentMessage)
+		candidate = append(candidate, withCitationConstraint(currentMessage, candidateIDs))
 		if c.estimator.EstimateMessages(candidate) > c.budget {
 			break
 		}
@@ -235,17 +242,18 @@ func (c *ContextCompiler) Compile(ctx context.Context, input any, legacyArgs ...
 		selectedMessages = candidateHistory
 	}
 
-	messages := make([]ModelMessage, 0, len(selectedMessages)+2)
-	messages = append(messages, systemMessage)
-	messages = append(messages, selectedMessages...)
-	messages = append(messages, currentMessage)
-	estimated := c.estimator.EstimateMessages(messages)
 	selectedIDs := make([]int64, 0, len(selectedMessages))
 	for _, group := range selectedGroups {
 		for _, event := range group {
 			selectedIDs = append(selectedIDs, event.ID)
 		}
 	}
+	currentMessage = withCitationConstraint(currentMessage, selectedIDs)
+	messages := make([]ModelMessage, 0, len(selectedMessages)+2)
+	messages = append(messages, systemMessage)
+	messages = append(messages, selectedMessages...)
+	messages = append(messages, currentMessage)
+	estimated := c.estimator.EstimateMessages(messages)
 	trace := ContextTrace{Budget: c.budget, EstimatedInputTokens: estimated, SelectedEventCount: len(selectedIDs)}
 	if len(selectedIDs) > 0 {
 		trace.SelectedFirstEventID = selectedIDs[0]
@@ -277,6 +285,15 @@ func (c *ContextCompiler) Compile(ctx context.Context, input any, legacyArgs ...
 		Trace:    trace,
 		Evidence: evidence,
 	}, nil
+}
+
+func withCitationConstraint(current ModelMessage, eventIDs []int64) ModelMessage {
+	if len(eventIDs) == 0 {
+		return current
+	}
+	encodedIDs, _ := json.Marshal(eventIDs)
+	current.Content += "\n\nAVAILABLE_HISTORY_EVENT_IDS_JSON:\n" + string(encodedIDs) + "\nFor conversation_recall, event_ids MUST be chosen only from this exact array."
+	return current
 }
 
 func persistedDiagnosisObservations(content string) ([]domain.Observation, bool) {

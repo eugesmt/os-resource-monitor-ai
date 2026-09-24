@@ -75,6 +75,8 @@ func (s *ConversationStore) verify(ctx context.Context) error {
 		{table: "profiles", columns: []string{"user_id", "style", "format", "constraints_json"}},
 		{table: "assistant_invariants", columns: []string{"id", "category", "statement", "enabled"}},
 		{table: "tasks", columns: []string{"task_id", "conversation_id", "goal", "phase", "step", "expected_action_kind", "expected_action", "status", "outcome", "last_error", "response_type", "version", "created_at", "updated_at"}},
+		{table: "metric_samples", columns: []string{"snapshot_id", "captured_at", "cpu_percent", "mem_percent", "missing_data_json"}},
+		{table: "metric_rollups", columns: []string{"bucket_start", "bucket_end", "sample_count", "cpu_sum", "memory_sum", "missing_data_json"}},
 	}
 	for _, expected := range wantColumns {
 		table, columns := expected.table, expected.columns

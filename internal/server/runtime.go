@@ -15,6 +15,7 @@ import (
 	"taskmanager-ai/internal/domain"
 	"taskmanager-ai/internal/invariants"
 	"taskmanager-ai/internal/memory"
+	"taskmanager-ai/internal/metrics"
 	"taskmanager-ai/internal/storage"
 )
 
@@ -27,11 +28,17 @@ const maxSnapshotAge = 10 * time.Second
 const maxAutomaticTaskTurns = 8
 const automaticTaskTurnDelay = 750 * time.Millisecond
 const maxAutomaticTaskRetries = 1
+const metricSampleWriteTimeout = 2 * time.Second
 
 type Runtime struct {
-	collector *collector.Collector
-	buffer    *storage.RingBuffer
-	log       *slog.Logger
+	collector           *collector.Collector
+	buffer              *storage.RingBuffer
+	log                 *slog.Logger
+	metricsStore        metrics.Store
+	metricsSummaryStore interface {
+		MetricsSummary(context.Context, time.Time, time.Time) (metrics.Summary, error)
+	}
+	metricsWorker *metrics.Worker
 
 	state            State
 	agentMu          sync.RWMutex
@@ -610,6 +617,25 @@ func (s *Runtime) SetHistoryStore(store ai.HistoryStore) {
 	s.agentMu.Unlock()
 }
 
+func (s *Runtime) SetMetricsStore(store metrics.Store) {
+	s.startMu.Lock()
+	s.metricsStore = store
+	s.metricsSummaryStore, _ = store.(interface {
+		MetricsSummary(context.Context, time.Time, time.Time) (metrics.Summary, error)
+	})
+	s.startMu.Unlock()
+}
+
+func (s *Runtime) MetricsSummary(ctx context.Context, from, to time.Time) (metrics.Summary, error) {
+	s.startMu.Lock()
+	store := s.metricsSummaryStore
+	s.startMu.Unlock()
+	if store == nil {
+		return metrics.Summary{}, errors.New("metrics store unavailable")
+	}
+	return store.MetricsSummary(ctx, from, to)
+}
+
 func (s *Runtime) Start(parent context.Context, interval time.Duration) {
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
@@ -618,6 +644,11 @@ func (s *Runtime) Start(parent context.Context, interval time.Duration) {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
+	metricsStore := s.metricsStore
+	if metricsStore != nil {
+		s.metricsWorker = metrics.NewWorker(metricsStore, s.log)
+		s.metricsWorker.Start(ctx)
+	}
 	s.collector.Start(ctx, interval, func(snapshot collector.SystemSnapshot) {
 		s.state.mu.Lock()
 		s.state.snapshot = cloneSnapshot(snapshot)
@@ -625,6 +656,14 @@ func (s *Runtime) Start(parent context.Context, interval time.Duration) {
 		s.state.mu.Unlock()
 		s.buffer.Add(snapshot)
 		s.broadcast(snapshot)
+		if metricsStore != nil {
+			writeCtx, writeCancel := context.WithTimeout(ctx, metricSampleWriteTimeout)
+			err := metricsStore.SaveMetricSample(writeCtx, snapshot)
+			writeCancel()
+			if err != nil && !errors.Is(err, context.Canceled) {
+				s.log.Warn("metric sample persistence failed", "error", err, "snapshot_id", snapshot.SnapshotID)
+			}
+		}
 	})
 }
 
@@ -636,6 +675,9 @@ func (s *Runtime) Stop() {
 	if cancel != nil {
 		cancel()
 		s.collector.Wait()
+		if s.metricsWorker != nil {
+			s.metricsWorker.Wait()
+		}
 	}
 	s.subscriberMu.Lock()
 	for ch := range s.subscribers {

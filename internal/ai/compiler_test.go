@@ -49,6 +49,9 @@ func TestContextCompilerPreservesChronologicalWholeTurnsAndOrphanUser(t *testing
 			t.Fatalf("historical payload %d = %#v", i, payload)
 		}
 	}
+	if current := compiled.Messages[len(compiled.Messages)-1].Content; !strings.Contains(current, "AVAILABLE_HISTORY_EVENT_IDS_JSON:\n[1,2,3]") {
+		t.Fatalf("current request omits exact citation constraint: %q", current)
+	}
 }
 
 func TestContextCompilerTrimsOldWholeTurnsFirst(t *testing.T) {
@@ -62,7 +65,7 @@ func TestContextCompilerTrimsOldWholeTurnsFirst(t *testing.T) {
 	renderer := DefaultPromptRenderer{}
 	estimator := ConservativeTokenEstimator{}
 	newestOnly := []ModelMessage{
-		renderer.System("system"), renderer.Historical(events[2]), renderer.Historical(events[3]), renderer.Current("snapshot", "question"),
+		renderer.System("system"), renderer.Historical(events[2]), renderer.Historical(events[3]), withCitationConstraint(renderer.Current("snapshot", "question"), []int64{3, 4}),
 	}
 	compiler := NewContextCompiler(history, estimator.EstimateMessages(newestOnly))
 	compiled, err := compiler.Compile(context.Background(), "default", 5, "system", "snapshot", "question")

@@ -70,7 +70,7 @@ func taskTestStore(t *testing.T) *storage.ConversationStore {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"20260920120000_conversation_event_log.sql", "20260920200000_memory_records.sql", "20260920220000_profiles.sql", "20260920230000_task_states.sql", "20260920240000_tasks.sql", "20260920250000_task_outcome.sql", "20260920260000_task_last_error.sql", "20260920270000_task_response_type.sql", "20260920280000_task_goal.sql", "20260920290000_assistant_invariants.sql", "20260920300000_task_invariant_conflict_response.sql"} {
+	for _, name := range []string{"20260920120000_conversation_event_log.sql", "20260920200000_memory_records.sql", "20260920220000_profiles.sql", "20260920230000_task_states.sql", "20260920240000_tasks.sql", "20260920250000_task_outcome.sql", "20260920260000_task_last_error.sql", "20260920270000_task_response_type.sql", "20260920280000_task_goal.sql", "20260920290000_assistant_invariants.sql", "20260920300000_task_invariant_conflict_response.sql", "20260920310000_metric_history.sql"} {
 		raw, readErr := os.ReadFile(filepath.Join("..", "..", "migrations", name))
 		if readErr != nil {
 			_ = db.Close()

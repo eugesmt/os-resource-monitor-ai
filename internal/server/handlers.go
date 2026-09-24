@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -62,6 +63,12 @@ type taskStateRequest struct {
 	Action  domain.TaskStateAction `json:"action"`
 }
 
+const (
+	minMetricsSummaryDuration = 3 * time.Minute
+	maxMetricsSummaryDuration = 7 * 24 * time.Hour
+	maxMetricsSummaryMinutes  = 7 * 24 * 60
+)
+
 func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -94,6 +101,24 @@ func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 			}
 		}
 		writeJSON(w, 200, historyResponse{Items: state.GetHistory(limit)})
+	})
+	mux.HandleFunc("/api/metrics/summary", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		from, to, err := parseMetricsSummaryRange(r.URL.Query(), time.Now().UTC())
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, err)
+			return
+		}
+		summary, err := state.MetricsSummary(r.Context(), from, to)
+		if err != nil {
+			state.log.Error("metrics summary failed", "error", err)
+			writeAPIError(w, http.StatusServiceUnavailable, errors.New("metrics summary unavailable"))
+			return
+		}
+		writeJSON(w, http.StatusOK, summary)
 	})
 	mux.HandleFunc("/api/ai/ask", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -514,6 +539,52 @@ func RegisterRoutes(mux *http.ServeMux, state *Runtime, webFS fs.FS) {
 		serveEvents(w, r, state)
 	})
 	mux.Handle("/", spaHandler(webFS))
+}
+
+func parseMetricsSummaryRange(query url.Values, now time.Time) (time.Time, time.Time, error) {
+	allowed := map[string]bool{"last_minutes": true, "from": true, "to": true}
+	for key, values := range query {
+		if !allowed[key] {
+			return time.Time{}, time.Time{}, fmt.Errorf("unknown query parameter %q", key)
+		}
+		if len(values) != 1 {
+			return time.Time{}, time.Time{}, fmt.Errorf("query parameter %q must be specified once", key)
+		}
+	}
+	lastValues, hasLast := query["last_minutes"]
+	fromValues, hasFrom := query["from"]
+	toValues, hasTo := query["to"]
+	if hasLast && (hasFrom || hasTo) {
+		return time.Time{}, time.Time{}, errors.New("use last_minutes or from and to, not both")
+	}
+	if !hasLast && (!hasFrom || !hasTo) {
+		return time.Time{}, time.Time{}, errors.New("provide last_minutes or both from and to")
+	}
+	if hasLast {
+		minutes, err := strconv.Atoi(lastValues[0])
+		if err != nil || minutes < 3 || minutes > maxMetricsSummaryMinutes {
+			return time.Time{}, time.Time{}, fmt.Errorf("last_minutes must be between 3 and %d", maxMetricsSummaryMinutes)
+		}
+		to := now.UTC()
+		return to.Add(-time.Duration(minutes) * time.Minute), to, nil
+	}
+	from, err := time.Parse(time.RFC3339, fromValues[0])
+	if err != nil {
+		return time.Time{}, time.Time{}, errors.New("from must be a valid RFC3339 timestamp")
+	}
+	to, err := time.Parse(time.RFC3339, toValues[0])
+	if err != nil {
+		return time.Time{}, time.Time{}, errors.New("to must be a valid RFC3339 timestamp")
+	}
+	from, to = from.UTC(), to.UTC()
+	if to.After(now.UTC()) {
+		return time.Time{}, time.Time{}, errors.New("to cannot be in the future")
+	}
+	duration := to.Sub(from)
+	if duration < minMetricsSummaryDuration || duration > maxMetricsSummaryDuration {
+		return time.Time{}, time.Time{}, errors.New("time range must be between 3 minutes and 7 days")
+	}
+	return from, to, nil
 }
 
 func serveEvents(w http.ResponseWriter, r *http.Request, state *Runtime) {

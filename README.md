@@ -39,6 +39,8 @@ make run
 
 Цель `make run` сначала применяет ожидающие Goose migrations к `CONTEXT_DB_PATH`, затем запускает приложение. Это единственный автоматизированный шаг подготовки локальной dev-БД; само приложение migrations не запускает и таблицы не создаёт.
 
+Отдельный read-only MCP-сервер для подключения внешних AI-агентов описан в [TASKMANAGER_MCP.md](TASKMANAGER_MCP.md).
+
 Для другого пути передайте его в Make явно: `CONTEXT_DB_PATH=/path/to/context.db make run`.
 
 Без `DEEPSEEK_API_KEY` мониторинг и UI продолжают работать, но AI endpoint сообщает, что AI не настроен.
