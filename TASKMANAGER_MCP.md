@@ -2,11 +2,13 @@
 
 ## Purpose
 
-`taskmanager-mcp` is a separate, read-only MCP server for AI agents. It supports
-both locally managed stdio and independently started Streamable HTTP transports.
-It exposes the operating-system data already collected by Task Manager without
-coupling an external agent to the application's AI pipeline, memory, profiles,
-invariants, or task state machine.
+`taskmanager-mcp` is a separate MCP server for AI agents. By default it is
+read-only. It supports both locally managed stdio and independently started
+Streamable HTTP transports. It exposes the operating-system data already
+collected by Task Manager without coupling an external agent to the
+application's AI pipeline, memory, profiles, invariants, or task state machine.
+An explicitly configured report directory enables one bounded write tool for
+diagnostic report artifacts.
 
 ## Architecture
 
@@ -24,7 +26,7 @@ AI agent -- MCP stdio or Streamable HTTP --> taskmanager-mcp
 ```
 
 The Task Manager HTTP server must already be running. The MCP process never
-collects metrics itself and never changes application state.
+collects metrics itself and never changes Task Manager application state.
 
 ## Tools
 
@@ -165,6 +167,45 @@ the generation timestamp. The Task Manager application persists samples and
 materializes completed three-minute UTC buckets in the background; the MCP
 process only reads the summary through `GET /api/metrics/summary`.
 
+### `save_diagnostic_report`
+
+This tool is registered only when `TASKMANAGER_MCP_REPORT_DIR` is set. It saves
+a complete diagnostic report in that server-controlled directory.
+
+Input:
+
+```json
+{
+  "content": "# Diagnostic report\n\nCPU usage is elevated.",
+  "format": "markdown"
+}
+```
+
+`format` must be `markdown` or `json`. JSON content is validated before it is
+written. Content is limited to 128 KiB. Clients cannot provide a filename or
+path; the server generates both and writes the file atomically with mode
+`0600`.
+
+Example result:
+
+```json
+{
+  "report_id": "20260925T120000.000000000Z-0123456789abcdef0123456789abcdef",
+  "path": "diagnostic-20260925T120000.000000000Z-0123456789abcdef0123456789abcdef.md",
+  "download_url": "http://127.0.0.1:8090/reports/diagnostic-20260925T120000.000000000Z-0123456789abcdef0123456789abcdef.md",
+  "format": "markdown",
+  "bytes_written": 52,
+  "sha256": "..."
+}
+```
+
+`path` is a filename relative to `TASKMANAGER_MCP_REPORT_DIR`; the absolute
+server filesystem path is not exposed. Newly created report files use mode
+`0600`; permissions on an already existing report directory remain the
+operator's responsibility. In Streamable HTTP mode, `download_url` is also
+returned so MCP clients can offer the report directly to users. In stdio mode
+the field is omitted because there is no HTTP origin.
+
 ## Build
 
 From the repository root:
@@ -191,6 +232,7 @@ Run the MCP process as a network service:
 TASKMANAGER_MCP_TRANSPORT=http \
 TASKMANAGER_MCP_ADDR=127.0.0.1:8090 \
 TASKMANAGER_API_URL=http://127.0.0.1:8080 \
+TASKMANAGER_MCP_REPORT_DIR=/path/to/taskmanager-reports \
 /tmp/taskmanager-mcp
 ```
 
@@ -199,6 +241,16 @@ The MCP endpoint is:
 ```text
 http://127.0.0.1:8090/mcp
 ```
+
+When report storage is enabled, generated reports are available through
+unguessable download URLs under:
+
+```text
+http://127.0.0.1:8090/reports/<generated-filename>
+```
+
+The route supports only `GET` and `HEAD`, has no directory listing, and serves
+matching generated Markdown or JSON reports as attachments.
 
 HTTP mode is stateless Streamable HTTP. The listener accepts only loopback
 addresses because this version has no MCP authentication or TLS.
@@ -226,6 +278,7 @@ TASKMANAGER_API_URL=http://127.0.0.1:8080 go run ./cmd/taskmanager-mcp
 | `TASKMANAGER_API_URL` | `http://127.0.0.1:8080` | Existing Task Manager HTTP API |
 | `TASKMANAGER_MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
 | `TASKMANAGER_MCP_ADDR` | `127.0.0.1:8090` | Streamable HTTP listen address |
+| `TASKMANAGER_MCP_REPORT_DIR` | unset | Enables `save_diagnostic_report` and confines output to this directory |
 
 Only `http` and `https` Task Manager API URLs with a host are accepted; URL
 user info, query strings and fragments are rejected. Requests and MCP request
@@ -332,7 +385,9 @@ copied into error messages.
 
 ## Security and limitations
 
-- MCP is read-only and cannot execute commands, terminate processes, or alter the application.
+- MCP is read-only by default and cannot execute commands, terminate processes, or alter the application.
+- Setting `TASKMANAGER_MCP_REPORT_DIR` enables only bounded diagnostic-report writes. The client cannot select a destination path.
+- In HTTP mode the same setting enables loopback-only report downloads. The route accepts only generated report names, uses rooted filesystem access, and never lists the report directory.
 - It exposes no AI history, memory, profile, invariant, or task-management tools.
 - The default HTTP endpoint is local and has no authentication; do not publish it or the MCP process outside a trusted boundary without adding separate access control.
 - Streamable HTTP refuses non-loopback listen addresses; remote access requires a future authenticated and TLS-protected deployment design.

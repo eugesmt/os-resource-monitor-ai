@@ -23,6 +23,7 @@ const (
 	defaultTransport   = "stdio"
 	defaultHTTPAddress = "127.0.0.1:8090"
 	httpEndpoint       = "/mcp"
+	reportEndpoint     = "/reports/"
 )
 
 func main() {
@@ -42,13 +43,15 @@ func run(ctx context.Context, getenv func(string) string) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
+	reportDirectory := strings.TrimSpace(getenv("TASKMANAGER_MCP_REPORT_DIR"))
+	serverOptions := []mcpserver.ServerOption{mcpserver.WithReportDirectory(reportDirectory)}
 	transport := strings.ToLower(strings.TrimSpace(getenv("TASKMANAGER_MCP_TRANSPORT")))
 	if transport == "" {
 		transport = defaultTransport
 	}
 	switch transport {
 	case "stdio":
-		err := mcpserver.NewServer(api).Run(ctx, &mcp.StdioTransport{MaxLineLength: 1 << 20})
+		err := mcpserver.NewServer(api, serverOptions...).Run(ctx, &mcp.StdioTransport{MaxLineLength: 1 << 20})
 		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
 			return nil
 		}
@@ -61,7 +64,13 @@ func run(ctx context.Context, getenv func(string) string) error {
 		if err := validateLoopbackAddress(address); err != nil {
 			return err
 		}
-		return runHTTP(ctx, address, mcpserver.NewStreamableHTTPHandler(api))
+		var reportHandler http.Handler
+		if reportDirectory != "" {
+			reportBaseURL := "http://" + address + reportEndpoint
+			serverOptions = append(serverOptions, mcpserver.WithReportDownloadBaseURL(reportBaseURL))
+			reportHandler = mcpserver.NewReportDownloadHandler(reportDirectory)
+		}
+		return runHTTP(ctx, address, mcpserver.NewStreamableHTTPHandler(api, serverOptions...), reportHandler)
 	default:
 		return fmt.Errorf("unsupported TASKMANAGER_MCP_TRANSPORT %q: use stdio or http", transport)
 	}
@@ -82,9 +91,12 @@ func validateLoopbackAddress(address string) error {
 	return nil
 }
 
-func runHTTP(ctx context.Context, address string, handler http.Handler) error {
+func runHTTP(ctx context.Context, address string, handler, reportHandler http.Handler) error {
 	mux := http.NewServeMux()
 	mux.Handle(httpEndpoint, handler)
+	if reportHandler != nil {
+		mux.Handle(reportEndpoint, reportHandler)
+	}
 	server := &http.Server{
 		Addr:              address,
 		Handler:           mux,

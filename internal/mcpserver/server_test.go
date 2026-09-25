@@ -3,11 +3,15 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -87,6 +91,156 @@ func TestServerRegistersOnlyExpectedToolsAndSchemas(t *testing.T) {
 		t.Errorf("last_minutes bounds = %#v", lastMinutes)
 	}
 	defer clientSession.Close()
+}
+
+func TestSaveDiagnosticReportProtocolCall(t *testing.T) {
+	directory := t.TempDir()
+	session := connectedMCPServer(t, NewServer(nil,
+		WithReportDirectory(directory),
+		WithReportDownloadBaseURL("http://127.0.0.1:8090/reports/"),
+	))
+	defer session.Close()
+
+	tools := map[string]*mcp.Tool{}
+	for tool, err := range session.Tools(context.Background(), nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		tools[tool.Name] = tool
+	}
+	saveTool, ok := tools["save_diagnostic_report"]
+	if !ok {
+		t.Fatal("save_diagnostic_report was not registered")
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(mustJSON(t, saveTool.InputSchema), &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema["additionalProperties"] != false {
+		t.Fatalf("save schema allows additional properties: %#v", schema)
+	}
+	properties := schema["properties"].(map[string]any)
+	if got := properties["format"].(map[string]any)["enum"]; !reflect.DeepEqual(got, []any{"markdown", "json"}) {
+		t.Fatalf("format enum = %#v", got)
+	}
+
+	content := "# Diagnostic report\n\nCPU usage is elevated.\n"
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "save_diagnostic_report", Arguments: map[string]any{"content": content, "format": "markdown"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("tool error: %#v", result.Content)
+	}
+	var output SaveDiagnosticReportOutput
+	decodeStructured(t, result.StructuredContent, &output)
+	if output.ReportID == "" || output.Path == "" || output.Format != "markdown" || output.BytesWritten != len(content) || len(output.SHA256) != 64 {
+		t.Fatalf("output = %#v", output)
+	}
+	if output.DownloadURL != "http://127.0.0.1:8090/reports/"+output.Path {
+		t.Fatalf("download URL = %q", output.DownloadURL)
+	}
+	if filepath.Base(output.Path) != output.Path {
+		t.Fatalf("tool exposed a non-relative report path: %q", output.Path)
+	}
+	data, err := os.ReadFile(filepath.Join(directory, output.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != content {
+		t.Fatalf("saved content = %q, want %q", data, content)
+	}
+	info, err := os.Stat(filepath.Join(directory, output.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("report permissions = %o, want 600", info.Mode().Perm())
+	}
+
+	jsonContent := `{"status":"warning"}`
+	jsonResult, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "save_diagnostic_report", Arguments: map[string]any{"content": jsonContent, "format": "json"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jsonResult.IsError {
+		t.Fatalf("JSON tool error: %#v", jsonResult.Content)
+	}
+	var jsonOutput SaveDiagnosticReportOutput
+	decodeStructured(t, jsonResult.StructuredContent, &jsonOutput)
+	if jsonOutput.Path == output.Path || filepath.Ext(jsonOutput.Path) != ".json" {
+		t.Fatalf("JSON output = %#v after markdown output %#v", jsonOutput, output)
+	}
+}
+
+func TestSaveDiagnosticReportOmitsDownloadURLWithoutHTTPConfiguration(t *testing.T) {
+	directory := t.TempDir()
+	session := connectedMCPServer(t, NewServer(nil, WithReportDirectory(directory)))
+	defer session.Close()
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "save_diagnostic_report", Arguments: map[string]any{"content": "report", "format": "markdown"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("tool error: %#v", result.Content)
+	}
+	var output SaveDiagnosticReportOutput
+	decodeStructured(t, result.StructuredContent, &output)
+	if output.DownloadURL != "" {
+		t.Fatalf("download URL = %q, want empty", output.DownloadURL)
+	}
+}
+
+func TestSaveDiagnosticReportRejectsInvalidInput(t *testing.T) {
+	directory := t.TempDir()
+	session := connectedMCPServer(t, NewServer(nil, WithReportDirectory(directory)))
+	defer session.Close()
+
+	for _, arguments := range []map[string]any{
+		{"content": "", "format": "markdown"},
+		{"content": "report", "format": "text"},
+		{"content": "not JSON", "format": "json"},
+		{"content": strings.Repeat("é", maxDiagnosticReportBytes/2+1), "format": "markdown"},
+		{"content": "report", "format": "markdown", "path": "../../report.md"},
+	} {
+		result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "save_diagnostic_report", Arguments: arguments})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.IsError {
+			t.Errorf("arguments %#v returned success", arguments)
+		}
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("invalid calls left files: %#v", entries)
+	}
+}
+
+func TestSaveDiagnosticReportHonorsCancelledContext(t *testing.T) {
+	directory := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := saveDiagnosticReport(ctx, directory, SaveDiagnosticReportInput{Content: "report", Format: "markdown"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	entries, readErr := os.ReadDir(directory)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("cancelled call created files: %#v", entries)
+	}
 }
 
 func TestTopProcessesProtocolCallSortsAndLimits(t *testing.T) {
@@ -396,7 +550,12 @@ func TestToolsPropagateUpstreamErrors(t *testing.T) {
 
 func connectedServer(t *testing.T, response string) (*mcp.Server, *mcp.ClientSession) {
 	t.Helper()
-	return connectedServerWithHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return connectedServerWithOptions(t, response)
+}
+
+func connectedServerWithOptions(t *testing.T, response string, options ...ServerOption) (*mcp.Server, *mcp.ClientSession) {
+	t.Helper()
+	return connectedServerWithHandlerOptions(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/snapshot":
@@ -406,10 +565,15 @@ func connectedServer(t *testing.T, response string) (*mcp.Server, *mcp.ClientSes
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	}), options...)
 }
 
 func connectedServerWithHandler(t *testing.T, handler http.Handler) (*mcp.Server, *mcp.ClientSession) {
+	t.Helper()
+	return connectedServerWithHandlerOptions(t, handler)
+}
+
+func connectedServerWithHandlerOptions(t *testing.T, handler http.Handler, options ...ServerOption) (*mcp.Server, *mcp.ClientSession) {
 	t.Helper()
 	httpServer := httptest.NewServer(handler)
 	t.Cleanup(httpServer.Close)
@@ -417,7 +581,12 @@ func connectedServerWithHandler(t *testing.T, handler http.Handler) (*mcp.Server
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := NewServer(api)
+	server := NewServer(api, options...)
+	return server, connectedMCPServer(t, server)
+}
+
+func connectedMCPServer(t *testing.T, server *mcp.Server) *mcp.ClientSession {
+	t.Helper()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(context.Background(), serverTransport, nil); err != nil {
 		t.Fatal(err)
@@ -427,7 +596,7 @@ func connectedServerWithHandler(t *testing.T, handler http.Handler) (*mcp.Server
 	if err != nil {
 		t.Fatal(err)
 	}
-	return server, session
+	return session
 }
 
 func mustJSON(t *testing.T, value any) []byte {

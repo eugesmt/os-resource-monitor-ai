@@ -86,13 +86,14 @@ const (
 	topProcessesInputSchema    = `{"type":"object","properties":{"sort_by":{"type":"string","enum":["cpu","memory"],"description":"Metric used to rank processes"},"limit":{"type":"integer","minimum":1,"maximum":20,"description":"Maximum number of processes to return"}},"required":["sort_by","limit"],"additionalProperties":false}`
 	resourceHistoryInputSchema = `{"type":"object","properties":{"metric":{"type":"string","enum":["cpu","memory","load","network_receive","network_send","disk_read","disk_write"],"description":"System metric to return"},"samples":{"type":"integer","minimum":1,"maximum":120,"description":"Maximum number of history samples"}},"required":["metric","samples"],"additionalProperties":false}`
 	metricsSummaryInputSchema  = `{"type":"object","properties":{"last_minutes":{"type":"integer","minimum":3,"maximum":10080,"description":"Relative lookback in minutes"},"from":{"type":"string","format":"date-time","description":"RFC3339 range start"},"to":{"type":"string","format":"date-time","description":"RFC3339 range end"}},"oneOf":[{"required":["last_minutes"]},{"required":["from","to"]}],"additionalProperties":false}`
+	saveDiagnosticReportSchema = `{"type":"object","properties":{"content":{"type":"string","minLength":1,"maxLength":131072,"description":"Complete diagnostic report content"},"format":{"type":"string","enum":["markdown","json"],"description":"File format for the report"}},"required":["content","format"],"additionalProperties":false}`
 )
 
-// NewStreamableHTTPHandler exposes the read-only tools over stateless MCP
-// Streamable HTTP. Authentication and listener policy remain the caller's
-// responsibility; the production command restricts its listener to loopback.
-func NewStreamableHTTPHandler(api *taskmanagerapi.Client) http.Handler {
-	server := NewServer(api)
+// NewStreamableHTTPHandler exposes tools over stateless MCP Streamable HTTP.
+// Authentication and listener policy remain the caller's responsibility; the
+// production command restricts its listener to loopback.
+func NewStreamableHTTPHandler(api *taskmanagerapi.Client, options ...ServerOption) http.Handler {
+	server := NewServer(api, options...)
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, &mcp.StreamableHTTPOptions{
@@ -104,8 +105,15 @@ func NewStreamableHTTPHandler(api *taskmanagerapi.Client) http.Handler {
 	return http.NewCrossOriginProtection().Handler(handler)
 }
 
-// NewServer constructs a read-only MCP server backed by the Task Manager API.
-func NewServer(api *taskmanagerapi.Client) *mcp.Server {
+// NewServer constructs an MCP server backed by the Task Manager API. It remains
+// read-only unless WithReportDirectory is supplied with a non-empty directory.
+func NewServer(api *taskmanagerapi.Client, options ...ServerOption) *mcp.Server {
+	config := serverConfig{}
+	for _, option := range options {
+		if option != nil {
+			option(&config)
+		}
+	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "taskmanager-mcp", Version: "v1.0.0"}, nil)
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_system_overview", Description: "Return the current compact operating-system overview", InputSchema: json.RawMessage(emptyInputSchema),
@@ -224,6 +232,20 @@ func NewServer(api *taskmanagerapi.Client) *mcp.Server {
 		}
 		return nil, output, nil
 	})
+	if config.reportDirectory != "" {
+		mcp.AddTool(server, &mcp.Tool{
+			Name: "save_diagnostic_report", Description: "Save a diagnostic report in the server-configured report directory", InputSchema: json.RawMessage(saveDiagnosticReportSchema),
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, input SaveDiagnosticReportInput) (*mcp.CallToolResult, SaveDiagnosticReportOutput, error) {
+			output, err := saveDiagnosticReport(ctx, config.reportDirectory, input)
+			if err != nil {
+				return nil, SaveDiagnosticReportOutput{}, err
+			}
+			if config.reportDownloadBaseURL != "" {
+				output.DownloadURL = config.reportDownloadBaseURL + "/" + output.Path
+			}
+			return nil, output, nil
+		})
+	}
 	return server
 }
 
