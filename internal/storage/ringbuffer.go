@@ -1,9 +1,10 @@
 package storage
 
 import (
+	"slices"
 	"sync"
 
-	"taskmanager-ai/internal/collector"
+	"system-monitor-ai/internal/collector"
 )
 
 type RingBuffer struct {
@@ -61,7 +62,10 @@ func (r *RingBuffer) getLastLocked(n int) []collector.SystemSnapshot {
 
 func cloneSnapshot(s collector.SystemSnapshot) collector.SystemSnapshot {
 	copySnapshot := s
-	copySnapshot.Disks = append([]collector.DiskInfo(nil), s.Disks...)
-	copySnapshot.Processes = append([]collector.ProcessInfo(nil), s.Processes...)
+	copySnapshot.CPUPerCore = slices.Clone(s.CPUPerCore)
+	copySnapshot.Disks = slices.Clone(s.Disks)
+	copySnapshot.GPU = slices.Clone(s.GPU)
+	copySnapshot.Processes = slices.Clone(s.Processes)
+	copySnapshot.MissingData = slices.Clone(s.MissingData)
 	return copySnapshot
 }

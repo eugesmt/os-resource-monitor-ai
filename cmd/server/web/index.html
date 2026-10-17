@@ -4,17 +4,29 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
-  <title>Task Manager AI</title>
+  <title>System Monitor AI</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <div class="brand">Task Manager <span>AI</span></div>
+        <div class="brand">System Monitor <span>AI</span></div>
         <div class="subtitle">Локальный мониторинг системы и AI-анализ</div>
       </div>
-      <div id="status" class="status"><span class="status-dot pending"></span><span>Подключение…</span></div>
+      <div class="topbar-actions">
+        <div class="profile-menu">
+          <button id="profileMenuButton" class="profile-menu-button" type="button" aria-expanded="false" aria-controls="profileMenu">
+            <span class="profile-icon" aria-hidden="true">◉</span><span>Профиль</span>
+          </button>
+          <div id="profileMenu" class="profile-menu-popover" hidden>
+            <div class="profile-menu-title">Выберите профиль</div>
+            <div id="profileList" class="profile-list"></div>
+            <button id="addProfileButton" class="profile-add-button" type="button">＋ Добавить профиль</button>
+          </div>
+        </div>
+        <div id="status" class="status"><span class="status-dot pending"></span><span>Подключение…</span></div>
+      </div>
     </header>
 
     <section class="metrics-grid" aria-label="Основные показатели">
@@ -39,10 +51,44 @@
         <div id="diskWrite" class="metric-sub">↑ —</div>
       </article>
       <article class="card metric-card">
+        <div class="metric-label">GPU</div>
+        <div id="gpu" class="metric-value">—</div>
+        <div id="gpuSub" class="metric-sub">Ожидание данных</div>
+      </article>
+      <article class="card metric-card">
         <div class="metric-label">История</div>
         <div id="historyCount" class="metric-value">0</div>
         <div class="metric-sub">снимков в памяти</div>
       </article>
+    </section>
+
+    <section class="card panel gpu-dashboard">
+      <div class="panel-head">
+        <div>
+          <h2>GPU dashboard</h2>
+          <div class="panel-hint">NVIDIA NVML · текущие показатели и история</div>
+        </div>
+      </div>
+      <div class="gpu-dashboard-history">История последних snapshot</div>
+      <div class="gpu-charts">
+        <article class="gpu-chart-card">
+          <div class="gpu-chart-title">Загрузка GPU</div>
+          <div class="gpu-chart-wrap"><svg id="gpuUtilChart" class="gpu-chart" role="img" aria-label="История загрузки GPU"></svg><div id="gpuUtilEmpty" class="chart-empty">Нет данных</div></div>
+        </article>
+        <article class="gpu-chart-card">
+          <div class="gpu-chart-title">Видеопамять</div>
+          <div class="gpu-chart-wrap"><svg id="gpuMemoryChart" class="gpu-chart" role="img" aria-label="История использования видеопамяти"></svg><div id="gpuMemoryEmpty" class="chart-empty">Нет данных</div></div>
+        </article>
+        <article class="gpu-chart-card">
+          <div class="gpu-chart-title">Температура</div>
+          <div class="gpu-chart-wrap"><svg id="gpuTemperatureChart" class="gpu-chart" role="img" aria-label="История температуры GPU"></svg><div id="gpuTemperatureEmpty" class="chart-empty">Нет данных</div></div>
+        </article>
+      </div>
+      <div class="subpanel-head">
+        <h3>CPU по ядрам</h3>
+        <div class="panel-hint">Текущая загрузка логических ядер</div>
+      </div>
+      <div id="cpuCores" class="cpu-cores"><div class="table-empty">Ожидание данных…</div></div>
     </section>
 
     <section class="card panel chart-panel">
@@ -83,19 +129,90 @@
       <div class="panel-head">
         <div>
           <h2>AI Assistant</h2>
-          <div class="panel-hint">DeepSeek анализирует текущие системные метрики</div>
+          <div class="panel-hint">Настроенный AI provider анализирует текущие системные метрики</div>
         </div>
       </div>
       <div id="chat" class="chat" aria-live="polite">
         <div class="message ai">Привет. Я вижу текущие метрики этой машины. Например, спроси: «Почему сейчас высокая загрузка CPU?»</div>
       </div>
+      <div id="taskStateCard" class="task-state" aria-labelledby="taskStateTitle" hidden>
+        <div class="task-state-head">
+          <div><h3 id="taskStateTitle">Состояние задачи</h3><div id="taskStateStatus" class="panel-hint">Загрузка…</div></div>
+          <div class="task-state-actions"><button id="taskPauseBtn" type="button">Пауза</button><button id="taskContinueBtn" type="button">Возобновить</button><button id="taskCancelBtn" type="button">Отменить</button></div>
+        </div>
+        <div class="task-state-fields">
+          <label>Этап<select id="taskPhase" disabled><option value="planning">planning</option><option value="execution">execution</option><option value="validation">validation</option><option value="done">done</option></select></label>
+          <label>Текущий шаг<input id="taskStep" readonly maxlength="1000" placeholder="Что сейчас выполняется"></label>
+          <label>Ожидаемое действие<input id="taskExpectedAction" readonly maxlength="1000" placeholder="Что нужно сделать дальше"></label>
+        </div>
+        <div id="taskExpectedKind" class="panel-hint"></div>
+        <div id="taskStateError" class="error" role="alert"></div>
+      </div>
       <form id="askForm" class="ask-form">
         <textarea id="question" maxlength="4000" rows="2" placeholder="Задайте вопрос о состоянии системы…"></textarea>
-        <button id="sendBtn" type="submit">Спросить</button>
+        <button id="sendBtn" type="submit" disabled>Спросить</button>
       </form>
       <div id="aiError" class="error" role="alert"></div>
     </section>
+
+    <section class="card panel memory-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Память агента</h2>
+          <div class="panel-hint">Три слоя выбираются явно и не смешиваются автоматически</div>
+        </div>
+      </div>
+      <form id="memoryForm" class="memory-form">
+        <input id="memoryKind" maxlength="80" placeholder="Тип, например preference" />
+        <input id="memoryContent" maxlength="1000" placeholder="Что сохранить" />
+        <button type="submit">Сохранить</button>
+      </form>
+      <div class="memory-tabs" role="tablist" aria-label="Слои памяти">
+        <button type="button" class="memory-tab active" data-memory-tab="short_term" role="tab">Краткосрочная</button>
+        <button type="button" class="memory-tab" data-memory-tab="working" role="tab">Рабочая</button>
+        <button type="button" class="memory-tab" data-memory-tab="long_term" role="tab">Долговременная</button>
+      </div>
+      <div id="memoryView" class="memory-view">Память загружается…</div>
+      <div id="memoryError" class="error" role="alert"></div>
+    </section>
+    <section class="card panel invariants-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Инварианты ассистента</h2>
+          <div class="panel-hint">Обязательные правила проекта, отдельные от диалога и памяти</div>
+        </div>
+      </div>
+      <form id="invariantForm" class="invariant-form">
+        <input id="invariantID" maxlength="128" required placeholder="ID, например stack-no-kubernetes" />
+        <input id="invariantCategory" maxlength="64" required placeholder="Категория: stack, architecture…" />
+        <input id="invariantStatement" maxlength="2000" required placeholder="Правило, которое нельзя нарушать" />
+        <label class="invariant-enabled"><input id="invariantEnabled" type="checkbox" checked /> Активен</label>
+        <button type="submit">Сохранить</button>
+      </form>
+      <div id="invariantsView" class="invariants-view">Инварианты загружаются…</div>
+      <div id="invariantsError" class="error" role="alert"></div>
+    </section>
   </main>
+  <dialog id="profileDialog" class="profile-dialog">
+    <div class="panel-head">
+      <div>
+        <h2>Профиль ассистента</h2>
+        <div class="panel-hint">Предпочтения учитываются в каждом запросе</div>
+      </div>
+      <button id="profileCloseButton" class="profile-close-button" type="button" aria-label="Закрыть">×</button>
+    </div>
+    <form id="profileForm" class="profile-form">
+      <label>Имя профиля<input id="profileUserID" maxlength="1000" required placeholder="Например, user-1"></label>
+      <label>Стиль ответа<input id="profileStyle" maxlength="1000" placeholder="Например, кратко и по делу"></label>
+      <label>Формат ответа<input id="profileFormat" maxlength="1000" placeholder="Например, списки и примеры"></label>
+      <label class="profile-wide">Ограничения<input id="profileConstraints" maxlength="5000" placeholder="По одному ограничению на строку"></label>
+      <div class="profile-actions">
+        <button id="profileSaveBtn" type="submit">Сохранить профиль</button>
+        <span id="profileStatus" class="panel-hint" role="status"></span>
+      </div>
+    </form>
+    <div id="profileError" class="error" role="alert"></div>
+  </dialog>
   <script src="/app.js"></script>
 </body>
 </html>

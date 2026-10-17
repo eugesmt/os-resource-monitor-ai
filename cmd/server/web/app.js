@@ -2,6 +2,9 @@ const $ = (id) => document.getElementById(id);
 let history = [];
 let aiBusy = false;
 let events = null;
+let profileLibrary = {};
+let taskState = null;
+let renderedTaskResultID = '';
 
 const COLORS = { grid: '#24303c', label: '#738095', cpu: '#79a9ec', mem: '#8fd1b0' };
 
@@ -14,6 +17,102 @@ function fmtBytes(value) {
 }
 
 function fmtRate(value) { return `${fmtBytes(value)}/s`; }
+
+function gpuMemoryPercent(gpu) {
+  const total = Number(gpu?.memory_total) || 0;
+  const used = Number(gpu?.memory_used) || 0;
+  return total > 0 ? (used / total) * 100 : 0;
+}
+
+function renderGPUs(gpus, missingData) {
+  const list = $('gpuList');
+  if (list) list.replaceChildren();
+  if (!Array.isArray(gpus) || gpus.length === 0) {
+    if (list) {
+      const empty = document.createElement('div');
+      empty.className = 'table-empty';
+      empty.textContent = Array.isArray(missingData) && missingData.includes('gpu')
+        ? 'NVIDIA GPU или NVML недоступны'
+        : 'Нет данных о GPU';
+      list.appendChild(empty);
+    }
+    $('gpu').textContent = '—';
+    $('gpuSub').textContent = 'Данные недоступны';
+    return;
+  }
+
+  const maxUtilization = Math.max(...gpus.map((gpu) => Number(gpu.utilization_percent) || 0));
+  const maxTemperature = Math.max(...gpus.map((gpu) => Number(gpu.temperature_celsius) || 0));
+  const totalMemory = gpus.reduce((sum, gpu) => sum + (Number(gpu.memory_total) || 0), 0);
+  const usedMemory = gpus.reduce((sum, gpu) => sum + (Number(gpu.memory_used) || 0), 0);
+  $('gpu').textContent = gpus.length === 1 ? String(gpus[0].name || 'NVIDIA GPU') : `${gpus.length} GPU`;
+  $('gpuSub').textContent = `${maxUtilization.toFixed(0)}% · VRAM ${(totalMemory ? usedMemory / totalMemory * 100 : 0).toFixed(1)}% · ${maxTemperature.toFixed(0)} °C`;
+
+  for (const gpu of gpus) {
+    const row = document.createElement('div');
+    row.className = 'gpu-row';
+    const name = document.createElement('div');
+    name.className = 'gpu-name';
+    name.textContent = String(gpu.name || `GPU ${gpu.index ?? ''}`);
+    const stats = document.createElement('div');
+    stats.className = 'gpu-stats';
+    stats.textContent = `GPU ${Number(gpu.utilization_percent || 0).toFixed(0)}% · VRAM ${gpuMemoryPercent(gpu).toFixed(1)}% (${fmtBytes(gpu.memory_used)} / ${fmtBytes(gpu.memory_total)}) · ${Number(gpu.temperature_celsius || 0).toFixed(0)} °C`;
+    row.append(name, stats);
+    if (list) list.appendChild(row);
+  }
+}
+
+function gpuSnapshotStats(snapshot) {
+  const gpus = Array.isArray(snapshot?.gpu) ? snapshot.gpu : [];
+  if (gpus.length === 0) return null;
+  const totalMemory = gpus.reduce((sum, gpu) => sum + (Number(gpu.memory_total) || 0), 0);
+  const usedMemory = gpus.reduce((sum, gpu) => sum + (Number(gpu.memory_used) || 0), 0);
+  return {
+    time: snapshot.timestamp || snapshot.captured_at,
+    utilization: Math.max(...gpus.map((gpu) => Number(gpu.utilization_percent) || 0)),
+    memory: totalMemory > 0 ? usedMemory / totalMemory * 100 : 0,
+    temperature: Math.max(...gpus.map((gpu) => Number(gpu.temperature_celsius) || 0)),
+  };
+}
+
+function drawGPUChart(svgId, emptyId, points, color, maxValue, unit) {
+  const svg = $(svgId);
+  const empty = $(emptyId);
+  const width = Math.max(260, svg.clientWidth || svg.parentElement.clientWidth || 360);
+  const height = 180;
+  const pad = { left: 38, right: 10, top: 12, bottom: 22 };
+  const plotW = Math.max(1, width - pad.left - pad.right);
+  const plotH = Math.max(1, height - pad.top - pad.bottom);
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.replaceChildren();
+  if (points.length === 0) {
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+  const xFor = (i) => pad.left + (points.length === 1 ? plotW / 2 : i / (points.length - 1) * plotW);
+  const yFor = (value) => pad.top + plotH - Math.max(0, Math.min(maxValue, value)) / maxValue * plotH;
+  for (const value of [0, maxValue / 2, maxValue]) {
+    const y = yFor(value);
+    svg.appendChild(svgEl('line', { x1: pad.left, y1: y, x2: pad.left + plotW, y2: y, stroke: COLORS.grid, 'stroke-width': 1 }));
+    const label = svgEl('text', { x: 4, y: y + 4, fill: COLORS.label, 'font-size': 10, 'font-family': 'system-ui' });
+    label.textContent = `${value.toFixed(0)}${unit}`;
+    svg.appendChild(label);
+  }
+  const coordinates = points.map((point, index) => `${xFor(index)},${yFor(point.value)}`).join(' ');
+  if (points.length === 1) {
+    svg.appendChild(svgEl('circle', { cx: xFor(0), cy: yFor(points[0].value), r: 3.5, fill: color }));
+  } else {
+    svg.appendChild(svgEl('polyline', { points: coordinates, fill: 'none', stroke: color, 'stroke-width': 2.2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+  }
+}
+
+function drawGPUCharts(items) {
+  const stats = (Array.isArray(items) ? items : []).map(gpuSnapshotStats).filter(Boolean);
+  drawGPUChart('gpuUtilChart', 'gpuUtilEmpty', stats.map((point) => ({ value: point.utilization })), '#c994f2', 100, '%');
+  drawGPUChart('gpuMemoryChart', 'gpuMemoryEmpty', stats.map((point) => ({ value: point.memory })), '#79c7ec', 100, '%');
+  drawGPUChart('gpuTemperatureChart', 'gpuTemperatureEmpty', stats.map((point) => ({ value: point.temperature })), '#efad76', 100, '°');
+}
 
 function setStatus(kind, text) {
   $('status').innerHTML = '';
@@ -56,6 +155,38 @@ function renderProcesses(processes) {
   }
 }
 
+function renderCPUCores(values, missingData) {
+  const container = $('cpuCores');
+  container.replaceChildren();
+  if (!Array.isArray(values) || values.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'table-empty';
+    empty.textContent = Array.isArray(missingData) && missingData.includes('cpu_per_core')
+      ? 'Данные по ядрам недоступны'
+      : 'Нет данных по ядрам';
+    container.appendChild(empty);
+    return;
+  }
+  values.forEach((value, index) => {
+    const row = document.createElement('div');
+    row.className = 'core-row';
+    const label = document.createElement('span');
+    label.className = 'core-label';
+    label.textContent = `Ядро ${index}`;
+    const track = document.createElement('div');
+    track.className = 'core-track';
+    const fill = document.createElement('div');
+    fill.className = 'core-fill';
+    fill.style.width = `${Math.max(0, Math.min(100, Number(value) || 0))}%`;
+    track.appendChild(fill);
+    const amount = document.createElement('span');
+    amount.className = 'core-value';
+    amount.textContent = `${Number(value || 0).toFixed(1)}%`;
+    row.append(label, track, amount);
+    container.appendChild(row);
+  });
+}
+
 function applySnapshot(snapshot) {
   $('cpu').textContent = `${Number(snapshot.cpu_percent || 0).toFixed(1)}%`;
   $('cpuSub').textContent = `обновлено ${new Date(snapshot.timestamp).toLocaleTimeString()}`;
@@ -65,6 +196,8 @@ function applySnapshot(snapshot) {
   $('sendSub').textContent = `↑ ${fmtRate(snapshot.network?.send_per_sec || 0)}`;
   $('diskRead').textContent = fmtRate(snapshot.disk_io?.read_per_sec || 0);
   $('diskWrite').textContent = `↑ ${fmtRate(snapshot.disk_io?.write_per_sec || 0)}`;
+  renderCPUCores(snapshot.cpu_per_core, snapshot.missing_data);
+  renderGPUs(snapshot.gpu, snapshot.missing_data);
   $('updatedAt').textContent = new Date(snapshot.timestamp).toLocaleString();
   renderProcesses(snapshot.processes);
 }
@@ -80,7 +213,35 @@ async function loadInitialState() {
     history = Array.isArray(payload.items) ? payload.items : [];
     $('historyCount').textContent = String(history.length);
     drawChart(history);
+    drawGPUCharts(history);
   }
+}
+
+async function restoreConversation() {
+  const response = await fetch('/api/ai/history', { cache: 'no-store' });
+  if (!response.ok) throw new Error('Не удалось восстановить историю диалога');
+  const payload = await response.json();
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  $('chat').replaceChildren();
+  let latestAssistant = null;
+  const renderLatestAssistant = () => {
+    if (!latestAssistant) return;
+    try {
+      addMessage('ai', formatAIAnswer(JSON.parse(latestAssistant.content)));
+    } catch {
+      addMessage('ai', 'Сохранённый ответ AI повреждён и не может быть показан.');
+    }
+    latestAssistant = null;
+  };
+  for (const item of items) {
+    if (item.role === 'user') {
+      renderLatestAssistant();
+      addMessage('user', String(item.content || ''));
+      continue;
+    }
+    if (item.role === 'assistant') latestAssistant = item;
+  }
+  renderLatestAssistant();
 }
 
 function addMessage(role, text) {
@@ -161,6 +322,7 @@ function subscribe() {
       if (history.length > 120) history.shift();
       $('historyCount').textContent = String(history.length);
       drawChart(history);
+      drawGPUCharts(history);
       setStatus('', 'Live');
     } catch {
       setStatus('bad', 'Ошибка данных');
@@ -170,9 +332,94 @@ function subscribe() {
   events.onerror = () => setStatus('bad', 'Переподключение…');
 }
 
+function formatAIAnswer(answer) {
+  if (!answer || typeof answer !== 'object') {
+    return 'Пустой ответ от AI';
+  }
+
+  if (answer.assistant_schema_version === 'assistant.v2') {
+    if (answer.response_type === 'diagnosis' && answer.diagnosis) {
+      return formatAIAnswer(answer.diagnosis);
+    }
+    if (answer.response_type === 'conversation_recall' && answer.conversation_recall) {
+      return answer.conversation_recall.answer || 'Пустой ответ от AI';
+    }
+    if (answer.response_type === 'metric_comparison' && answer.metric_comparison) {
+      const comparison = answer.metric_comparison;
+      const points = Array.isArray(comparison.points) ? comparison.points : [];
+      const renderedPoints = points.map((point) => `${point.metric ?? ''}: ${point.value ?? ''}${point.unit ? ` ${point.unit}` : ''}`).join('\n');
+      return [comparison.answer || '', renderedPoints ? `Наблюдения:\n${renderedPoints}` : ''].filter(Boolean).join('\n\n') || 'Пустой ответ от AI';
+    }
+    if (answer.response_type === 'general_answer' && answer.general_answer) {
+      return answer.general_answer.answer || 'Пустой ответ от AI';
+    }
+    if (answer.response_type === 'invariant_conflict' && answer.invariant_conflict) {
+      const conflict = answer.invariant_conflict;
+      const ids = Array.isArray(conflict.invariant_ids) ? conflict.invariant_ids.join(', ') : '';
+      return [conflict.answer || 'Запрос конфликтует с правилами проекта.', ids ? `Нарушенные инварианты: ${ids}` : ''].filter(Boolean).join('\n\n');
+    }
+  }
+
+  const parts = [];
+
+  if (answer.status) {
+    parts.push(`Статус: ${answer.status}`);
+  }
+
+  if (answer.summary) {
+    parts.push(answer.summary);
+  }
+
+  if (Array.isArray(answer.observations) && answer.observations.length > 0) {
+    parts.push(
+      'Наблюдения:\n' +
+      answer.observations
+        .map((observation) => {
+          const metric = observation.metric ?? '';
+          const value = observation.value ?? '';
+          const unit = observation.unit ?? '';
+          const interpretation = observation.interpretation ?? '';
+          const pid = observation.pid == null ? '' : ` (PID ${observation.pid})`;
+          const detail = interpretation ? ` — ${interpretation}` : '';
+
+          return `• ${metric}${pid}: ${value}${unit ? ` ${unit}` : ''}${detail}`;
+        })
+        .join('\n')
+    );
+  }
+
+  if (Array.isArray(answer.hypotheses) && answer.hypotheses.length > 0) {
+    parts.push(
+      'Гипотезы:\n' +
+      answer.hypotheses.map((hypothesis) => `• ${hypothesis}`).join('\n')
+    );
+  }
+
+  if (Array.isArray(answer.missing_data) && answer.missing_data.length > 0) {
+    parts.push(
+      'Недостающие данные:\n' +
+      answer.missing_data.map((missing) => `• ${missing}`).join('\n')
+    );
+  }
+
+  if (
+    Array.isArray(answer.recommendations) &&
+    answer.recommendations.length > 0
+  ) {
+    parts.push(
+      'Рекомендации:\n' +
+      answer.recommendations
+        .map((recommendation) => `• ${recommendation}`)
+        .join('\n')
+    );
+  }
+
+  return parts.join('\n\n') || 'Пустой ответ от AI';
+}
+
 $('askForm').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (aiBusy) return;
+  if (aiBusy || !taskAcceptsUserInput()) return;
   const question = $('question').value.trim();
   if (!question) return;
   aiBusy = true;
@@ -188,17 +435,33 @@ $('askForm').addEventListener('submit', async (event) => {
       body: JSON.stringify({ question }),
     });
     const payload = await response.json();
+    if (payload.task_state) renderTaskState(payload.task_state);
     if (!response.ok) throw new Error(payload.error || 'AI request failed');
-    addMessage('ai', payload.answer || 'Пустой ответ от AI');
+    if (payload.answer) addMessage('ai', formatAIAnswer(payload.answer));
   } catch (error) {
     $('aiError').textContent = error instanceof Error ? error.message : 'Не удалось получить ответ AI';
   } finally {
     aiBusy = false;
-    $('sendBtn').disabled = false;
+    updateAskAvailability();
     $('sendBtn').textContent = 'Спросить';
     $('question').focus();
   }
 });
+
+function updateAskAvailability() {
+  const acceptsInput = taskAcceptsUserInput();
+  $('question').disabled = !acceptsInput;
+  $('sendBtn').disabled = aiBusy || !acceptsInput;
+}
+
+function taskAcceptsUserInput() {
+  if (!taskState || taskState.phase === 'done') return true;
+  return taskState.status === 'active' && taskState.expected_action_kind === 'user';
+}
+
+function taskPhaseLabel(phase) {
+  return { planning: 'Планирование', execution: 'Выполнение', validation: 'Проверка', done: 'Готово' }[phase] || phase;
+}
 
 $('question').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) {
@@ -207,14 +470,440 @@ $('question').addEventListener('keydown', (event) => {
   }
 });
 
+function renderTaskState(state) {
+  taskState = state;
+  if (!state) {
+    $('taskStateCard').hidden = true;
+    $('taskPhase').value = 'planning';
+    $('taskStep').value = '';
+    $('taskExpectedAction').value = '';
+    $('taskStateStatus').textContent = 'Задача ещё не начата';
+    $('taskPauseBtn').disabled = true;
+    $('taskContinueBtn').disabled = true;
+    $('taskCancelBtn').disabled = true;
+    $('taskExpectedKind').textContent = 'Введите цель задачи, чтобы начать выполнение.';
+    $('question').placeholder = 'Опишите задачу, которую нужно выполнить…';
+    updateAskAvailability();
+    return;
+  }
+  $('taskStateCard').hidden = false;
+  $('taskPhase').value = state.phase || 'planning';
+  $('taskStep').value = state.step || '';
+  $('taskExpectedAction').value = state.expected_action || '';
+  const lifecycle = state.phase === 'done' ? (state.outcome === 'cancelled' ? 'отменена' : 'завершена') : (state.status === 'paused' ? (state.last_error ? 'остановлена из-за ошибки' : 'на паузе') : 'в работе');
+  $('taskStateStatus').textContent = `${taskPhaseLabel(state.phase)} · ${lifecycle}`;
+  const expectation = { agent: 'Агент выполняет следующий шаг автоматически. Можно поставить задачу на паузу.', user: 'Ответьте на вопрос агента в поле ввода ниже.', tool: 'Агент ожидает результат инструмента. Можно поставить задачу на паузу.', none: 'Задача завершена.' };
+  $('taskExpectedKind').textContent = state.last_error || expectation[state.expected_action_kind] || '';
+  $('taskPauseBtn').disabled = state.status !== 'active' || state.phase === 'done';
+  $('taskContinueBtn').disabled = state.status !== 'paused' || state.phase === 'done';
+  $('taskCancelBtn').disabled = state.phase === 'done';
+  $('question').placeholder = state.expected_action_kind === 'user' ? 'Введите ответ для продолжения задачи…' : 'Ожидание следующего действия агента…';
+  updateAskAvailability();
+}
+
+async function loadTaskState() {
+  const response = await fetch('/api/ai/task/state', { cache: 'no-store' });
+  const payload = await response.json();
+  if (response.status === 404) {
+    renderTaskState(null);
+    return;
+  }
+  if (!response.ok) throw new Error(payload.error || 'Не удалось загрузить состояние задачи');
+  renderTaskState(payload);
+}
+
+async function showCompletedTaskResult() {
+  if (!taskState || taskState.phase !== 'done' || taskState.outcome !== 'completed' || renderedTaskResultID === taskState.task_id) return;
+  const response = await fetch('/api/ai/task/result', { cache: 'no-store' });
+  const payload = await response.json();
+  if (!response.ok || !payload.content) return;
+  try {
+    addMessage('ai', formatAIAnswer(JSON.parse(payload.content)));
+    renderedTaskResultID = taskState.task_id;
+  } catch {
+    addMessage('ai', String(payload.content));
+    renderedTaskResultID = taskState.task_id;
+  }
+}
+
+async function changeTaskState(action) {
+  if (!taskState) throw new Error('Задача ещё не начата');
+  $('taskStateError').textContent = '';
+  const response = await fetch('/api/ai/task/state', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, task_id: taskState.task_id, version: taskState.version }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось изменить состояние задачи');
+  renderTaskState(payload);
+}
+
+async function continueTask() {
+  if (!taskState) throw new Error('Задача ещё не начата');
+  if (taskState.status !== 'paused') return;
+  await changeTaskState('resume');
+}
+
+async function cancelTask() {
+  if (!taskState) throw new Error('Задача ещё не начата');
+  const response = await fetch('/api/ai/task/cancel', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task_id: taskState.task_id, version: taskState.version }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось отменить задачу');
+  renderTaskState(payload);
+}
+
+if ($('taskPauseBtn')) {
+  $('taskContinueBtn').addEventListener('click', () => continueTask().catch((error) => { $('taskStateError').textContent = error.message; }));
+  $('taskPauseBtn').addEventListener('click', () => changeTaskState('pause').catch((error) => { $('taskStateError').textContent = error.message; }));
+	$('taskCancelBtn').addEventListener('click', () => cancelTask().catch((error) => { $('taskStateError').textContent = error.message; }));
+}
+
+function fillProfile(profile) {
+  $('profileUserID').value = profile?.user_id || '';
+  $('profileStyle').value = profile?.style || '';
+  $('profileFormat').value = profile?.format || '';
+  $('profileConstraints').value = Array.isArray(profile?.constraints) ? profile.constraints.join('\n') : '';
+}
+
+function rememberProfile(profile) {
+  if (!profile?.user_id) return;
+  profileLibrary[profile.user_id] = {
+    user_id: profile.user_id,
+    style: profile.style || '',
+    format: profile.format || '',
+    constraints: Array.isArray(profile.constraints) ? profile.constraints : [],
+  };
+}
+
+function renderProfileList(activeID = $('profileUserID')?.value.trim()) {
+  const list = $('profileList');
+  if (!list) return;
+  list.replaceChildren();
+  Object.values(profileLibrary).sort((left, right) => left.user_id.localeCompare(right.user_id)).forEach((profile) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = profile.user_id;
+    button.classList.toggle('active', profile.user_id === activeID);
+    button.dataset.profileId = profile.user_id;
+    list.appendChild(button);
+  });
+}
+
+function closeProfileMenu() {
+  $('profileMenu').hidden = true;
+  $('profileMenuButton').setAttribute('aria-expanded', 'false');
+}
+
+function openProfileEditor() {
+  const dialog = $('profileDialog');
+  if (dialog && !dialog.open) dialog.showModal();
+}
+
+async function activateProfile(profile) {
+  const response = await fetch('/api/ai/profile', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(profile),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось выбрать профиль');
+  fillProfile(payload);
+  rememberProfile(payload);
+  renderProfileList(payload.user_id);
+  $('profileStatus').textContent = `Активен: ${payload.user_id}`;
+}
+
+async function loadProfile() {
+  const profilesResponse = await fetch('/api/ai/profiles', { cache: 'no-store' });
+  const profilesPayload = await profilesResponse.json();
+  if (!profilesResponse.ok) throw new Error(profilesPayload.error || 'Не удалось загрузить профили');
+  profileLibrary = Object.fromEntries((Array.isArray(profilesPayload) ? profilesPayload : []).map((profile) => [profile.user_id, profile]));
+  renderProfileList();
+
+  const response = await fetch('/api/ai/profile', { cache: 'no-store' });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось загрузить профиль');
+  if (!payload.user_id) {
+    const firstProfile = Object.values(profileLibrary)[0];
+    if (firstProfile) {
+      await activateProfile(firstProfile);
+      return;
+    }
+  }
+  fillProfile(payload);
+  rememberProfile(payload);
+  renderProfileList(payload.user_id);
+}
+
+if ($('profileForm')) {
+  renderProfileList();
+  $('profileMenuButton').addEventListener('click', () => {
+    const menu = $('profileMenu');
+    menu.hidden = !menu.hidden;
+    $('profileMenuButton').setAttribute('aria-expanded', String(!menu.hidden));
+  });
+  $('profileList').addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-profile-id]');
+    if (!button) return;
+    $('profileError').textContent = '';
+    try {
+      await activateProfile(profileLibrary[button.dataset.profileId]);
+      await loadTaskState();
+      await restoreConversation();
+      await loadMemory();
+      closeProfileMenu();
+      openProfileEditor();
+    } catch (error) {
+      $('profileError').textContent = error instanceof Error ? error.message : 'Ошибка выбора профиля';
+    }
+  });
+  $('addProfileButton').addEventListener('click', () => {
+    const name = window.prompt('Введите имя нового профиля');
+    if (!name || !name.trim()) return;
+    const profile = { user_id: name.trim(), style: '', format: '', constraints: [] };
+    rememberProfile(profile);
+    fillProfile(profile);
+    renderProfileList(profile.user_id);
+    closeProfileMenu();
+    $('profileStatus').textContent = 'Заполните данные и сохраните профиль';
+    openProfileEditor();
+    $('profileStyle').focus();
+  });
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest('.profile-menu')) closeProfileMenu();
+  });
+  $('profileCloseButton').addEventListener('click', () => $('profileDialog').close());
+  $('profileForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = $('profileSaveBtn');
+    button.disabled = true;
+    $('profileError').textContent = '';
+    $('profileStatus').textContent = '';
+    try {
+      const constraints = $('profileConstraints').value.split('\n').map((item) => item.trim()).filter(Boolean);
+      await activateProfile({
+        user_id: $('profileUserID').value.trim(),
+        style: $('profileStyle').value.trim(),
+        format: $('profileFormat').value.trim(),
+        constraints,
+      });
+      await loadTaskState();
+      await restoreConversation();
+      await loadMemory();
+      $('profileStatus').textContent = 'Профиль сохранён';
+      $('profileDialog').close();
+    } catch (error) {
+      $('profileError').textContent = error instanceof Error ? error.message : 'Ошибка профиля';
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+function renderMemory(context) {
+  const displayContent = (item) => {
+    if (item.kind !== 'assistant') return item.content;
+    try {
+      const response = JSON.parse(item.content);
+      const type = response.response_type;
+      if (type === 'diagnosis') return response.diagnosis?.summary || 'Диагностический ответ';
+      if (type === 'general_answer') return response.general_answer?.answer || 'Общий ответ';
+      if (type === 'conversation_recall') return response.conversation_recall?.answer || 'Ответ по истории диалога';
+      if (type === 'metric_comparison') return response.metric_comparison?.summary || 'Сравнение метрик';
+      if (type === 'invariant_conflict') return response.invariant_conflict?.answer || 'Запрос отклонён из-за инварианта';
+    } catch {
+      // Keep non-JSON historical content readable.
+    }
+    return item.content;
+  };
+  window.memoryContext = context;
+  const active = document.querySelector('.memory-tab.active')?.dataset.memoryTab || 'short_term';
+  const records = Array.isArray(context[active]) ? context[active] : [];
+  const view = $('memoryView');
+  view.replaceChildren();
+  if (!records.length) {
+    view.textContent = 'Этот слой памяти пуст';
+    return;
+  }
+  records.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'memory-record';
+    const text = document.createElement('span');
+    text.textContent = `${item.kind}: ${displayContent(item)}`;
+    if (item.layer !== 'short_term') {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'memory-delete';
+      remove.textContent = 'Удалить';
+      remove.dataset.memoryId = item.id;
+      row.append(text, remove);
+    } else {
+      row.append(text);
+    }
+    view.append(row);
+  });
+}
+
+document.querySelectorAll('.memory-tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.memory-tab').forEach((item) => item.classList.toggle('active', item === tab));
+    if (window.memoryContext) renderMemory(window.memoryContext);
+  });
+});
+
+$('memoryView').addEventListener('click', async (event) => {
+  const button = event.target.closest('.memory-delete');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/ai/memory/${encodeURIComponent(button.dataset.memoryId)}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error('Не удалось удалить запись');
+    await loadMemory();
+  } catch (error) {
+    $('memoryError').textContent = error instanceof Error ? error.message : 'Ошибка удаления памяти';
+    button.disabled = false;
+  }
+});
+
+async function loadMemory() {
+  const response = await fetch('/api/ai/memory');
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось загрузить память');
+  renderMemory(payload.context);
+}
+
+if ($('memoryForm')) {
+  $('memoryForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    $('memoryError').textContent = '';
+    try {
+      const response = await fetch('/api/ai/memory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          layer: document.querySelector('.memory-tab.active')?.dataset.memoryTab || 'short_term',
+          scope: 'default',
+          kind: $('memoryKind').value.trim(),
+          content: $('memoryContent').value.trim(),
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Не удалось сохранить память');
+      $('memoryKind').value = '';
+      $('memoryContent').value = '';
+      await loadMemory();
+    } catch (error) {
+      $('memoryError').textContent = error instanceof Error ? error.message : 'Ошибка памяти';
+    }
+  });
+}
+
+let invariants = [];
+
+function renderInvariants(items) {
+  invariants = Array.isArray(items) ? items : [];
+  const view = $('invariantsView');
+  view.replaceChildren();
+  if (!invariants.length) {
+    view.textContent = 'Инварианты не заданы';
+    return;
+  }
+  invariants.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = `invariant-record${item.enabled ? '' : ' inactive'}`;
+    const text = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'invariant-title';
+    title.textContent = item.id;
+    const details = document.createElement('div');
+    details.className = 'invariant-meta';
+    details.textContent = `${item.category}: ${item.statement}${item.enabled ? '' : ' · выключен'}`;
+    text.append(title, details);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'invariant-delete';
+    remove.dataset.invariantId = item.id;
+    remove.textContent = 'Удалить';
+    row.append(text, remove);
+    view.append(row);
+  });
+}
+
+async function loadInvariants() {
+  const response = await fetch('/api/ai/invariants', { cache: 'no-store' });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || 'Не удалось загрузить инварианты');
+  renderInvariants(payload.items);
+}
+
+if ($('invariantForm')) {
+  $('invariantForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    $('invariantsError').textContent = '';
+    const item = {
+      id: $('invariantID').value.trim(),
+      category: $('invariantCategory').value.trim(),
+      statement: $('invariantStatement').value.trim(),
+      enabled: $('invariantEnabled').checked,
+    };
+    try {
+      const next = invariants.filter((current) => current.id !== item.id);
+      next.push(item);
+      const response = await fetch('/api/ai/invariants', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: next }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Не удалось сохранить инвариант');
+      renderInvariants(payload.items);
+      $('invariantForm').reset();
+      $('invariantEnabled').checked = true;
+    } catch (error) {
+      $('invariantsError').textContent = error instanceof Error ? error.message : 'Ошибка сохранения инварианта';
+    }
+  });
+  $('invariantsView').addEventListener('click', async (event) => {
+    const button = event.target.closest('.invariant-delete');
+    if (!button) return;
+    button.disabled = true;
+    $('invariantsError').textContent = '';
+    try {
+      const response = await fetch(`/api/ai/invariants/${encodeURIComponent(button.dataset.invariantId)}`, { method: 'DELETE' });
+      if (!response.ok) {
+        const payload = await response.json();
+        throw new Error(payload.error || 'Не удалось удалить инвариант');
+      }
+      await loadInvariants();
+    } catch (error) {
+      $('invariantsError').textContent = error instanceof Error ? error.message : 'Ошибка удаления инварианта';
+      button.disabled = false;
+    }
+  });
+}
+
 window.addEventListener('resize', () => drawChart(history));
 
 (async function init() {
   setStatus('pending', 'Подключение…');
   try {
     await loadInitialState();
+    await loadProfile();
+    await loadTaskState();
+    await restoreConversation();
+    await loadMemory();
+    await loadInvariants();
   } catch {
     setStatus('bad', 'Нет связи с сервером');
+    $('aiError').textContent = 'Не удалось восстановить историю диалога.';
+  } finally {
+    updateAskAvailability();
   }
   subscribe();
+  setInterval(() => {
+    if (taskState && taskState.phase !== 'done') {
+      loadTaskState().then(showCompletedTaskResult).catch(() => {});
+    }
+  }, 1000);
 })();

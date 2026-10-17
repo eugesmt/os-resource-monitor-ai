@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache: true
+
+      - name: Install pinned Goose CLI
+        run: |
+          go install github.com/pressly/goose/v3/cmd/goose@v3.28.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Run Go vet
+        run: go vet ./...
+
+      - name: Check frontend JavaScript syntax
+        run: node --check cmd/server/web/app.js
+
+      - name: Run frontend contract tests
+        run: node cmd/server/web/web_test.js
+
+      - name: Validate Goose migrations on a temporary SQLite database
+        shell: bash
+        run: |
+          db="$(mktemp)"
+          trap 'rm -f "$db"' EXIT
+          goose -dir migrations sqlite3 "$db" up
+          goose -dir migrations sqlite3 "$db" status

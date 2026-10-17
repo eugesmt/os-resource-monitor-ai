@@ -5,23 +5,69 @@ import (
 	"testing"
 	"time"
 
-	"taskmanager-ai/internal/collector"
+	"system-monitor-ai/internal/collector"
 )
 
 func TestBuildContextIncludesKeySections(t *testing.T) {
 	now := time.Now()
 	current := collector.SystemSnapshot{
 		Timestamp: now, CPUPercent: 60, MemUsed: 4 * 1024 * 1024 * 1024, MemTotal: 8 * 1024 * 1024 * 1024, MemPercent: 50,
-		Processes: []collector.ProcessInfo{{PID: 42, Name: "testproc", CPUPercent: 33.3, MemPercent: 4.2}},
+		CPUPerCore: []float64{10, 20, 30, 40},
+		Processes:  []collector.ProcessInfo{{PID: 42, Name: "testproc", CPUPercent: 33.3, MemPercent: 4.2}},
+		GPU:        []collector.GPUInfo{{Index: 0, Name: "test-gpu", UtilizationPercent: 25}},
 	}
-	previous := current
-	previous.CPUPercent = 40
-	previous.MemPercent = 48
-
-	text := BuildContext(current, []collector.SystemSnapshot{previous, current})
-	for _, want := range []string{"SYSTEM STATE", "Top 5 processes", "testproc", "Change vs previous", "History over last 2 snapshots"} {
+	current.SnapshotID = "snap-current"
+	text := BuildContext(current, []collector.SystemSnapshot{{SnapshotID: "old"}})
+	for _, want := range []string{"SNAPSHOT_DATA", "UNTRUSTED DATA", "snap-current", "cpu_per_core", "testproc", "test-gpu", "CURRENT_SNAPSHOT_ONLY=true"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("context missing %q: %s", want, text)
 		}
+	}
+	if strings.Contains(text, "old") {
+		t.Fatal("history snapshot leaked into current-only context")
+	}
+}
+
+func TestDefaultSystemPromptDefinesCanonicalMissingDataAndDerivedGPUMetric(t *testing.T) {
+	for _, section := range []string{"cpu", "cpu_per_core", "memory", "swap", "load", "host", "cpu_cores", "disks", "disk_io", "network", "gpu", "processes"} {
+		if !strings.Contains(DefaultSystemPrompt, section) {
+			t.Fatalf("system prompt does not enumerate missing_data section %q", section)
+		}
+	}
+	for _, want := range []string{
+		"missing_data может содержать только точные идентификаторы секций",
+		"Не помещай туда пояснения",
+		"gpu.memory.utilization_percent — производная метрика",
+		"memory_used / memory_total * 100",
+	} {
+		if !strings.Contains(DefaultSystemPrompt, want) {
+			t.Fatalf("system prompt missing contract text %q", want)
+		}
+	}
+}
+
+func TestDefaultSystemPromptRequiresAssistantEnvelopeAndCodeOwnedTaskState(t *testing.T) {
+	for _, want := range []string{
+		`"assistant_schema_version" со значением "assistant.v2"`,
+		`НИКОГДА не возвращай diagnosis.v1 object в корне`,
+		`переходы planning, execution, validation и done выполняет код`,
+	} {
+		if !strings.Contains(DefaultSystemPrompt, want) {
+			t.Fatalf("system prompt missing task envelope rule %q", want)
+		}
+	}
+}
+
+func TestProjectSnapshotSelectsTopCPUAndMemoryProcesses(t *testing.T) {
+	processes := make([]collector.ProcessInfo, 25)
+	for i := range processes {
+		processes[i] = collector.ProcessInfo{PID: int32(i + 1), CPUPercent: float64(25 - i), MemPercent: float32(i + 1), MemBytes: uint64(i + 1)}
+	}
+	projected := projectSnapshot(collector.SystemSnapshot{Processes: processes})
+	if projected.ProcessCount != 25 || !projected.ProcessesTruncated || len(projected.Processes) != 20 {
+		t.Fatalf("projected process metadata = count:%d truncated:%t len:%d", projected.ProcessCount, projected.ProcessesTruncated, len(projected.Processes))
+	}
+	if projected.Processes[0].PID != 1 {
+		t.Fatalf("first process = %#v, want highest CPU process", projected.Processes[0])
 	}
 }

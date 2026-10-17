@@ -1,0 +1,12 @@
+{
+  "eval_set_version": "os-assistant-v2.source-aware.v1",
+  "schema_version": "assistant.v2",
+  "grader_version": "os-assistant-v2.grader.v1",
+  "cases": [
+    {"name": "recall-memory-history", "response_type": "conversation_recall", "expectation": "selected event_ids from bounded historical window"},
+    {"name": "comparison-gpu-temperature", "response_type": "metric_comparison", "expectation": "current and validated historical points with event_id/snapshot_id"},
+    {"name": "general-gpu-explanation", "response_type": "general_answer", "topic": "gpu", "expectation": "domain-limited answer"},
+    {"name": "general-gpu-follow-up", "response_type": "general_answer", "topic": "gpu", "expectation": "pronoun follow-up grounded by current GPU snapshot"},
+    {"name": "general-out-of-domain", "response_type": "general_answer", "topic": "os_monitoring", "expectation": "semantic rejection outside OS/hardware domain"}
+  ]
+}
