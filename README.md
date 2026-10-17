@@ -1,6 +1,6 @@
-# Task Manager AI — Bounded-context OS Assistant
+# System Monitor AI — Bounded-context OS Assistant
 
-Локальный web-based диспетчер задач с AI-ассистентом. Приложение собирает нормализованные метрики ОС через `gopsutil`, показывает текущие данные и короткую историю в браузере, а по запросу пользователя отправляет в DeepSeek свежий системный snapshot вместе с bounded окном исторического диалога. Принятые вопросы и проверенные ответы сохраняются в append-only SQLite event log.
+Локальный web-based мониторинг системы с AI-ассистентом. Приложение собирает нормализованные метрики ОС через `gopsutil`, показывает текущие данные и короткую историю в браузере, а по запросу пользователя отправляет в любой OpenAI-compatible Chat Completions endpoint свежий системный snapshot вместе с bounded окном исторического диалога. Принятые вопросы и проверенные ответы сохраняются в append-only SQLite event log.
 
 Этот README — единая документация по запуску, архитектуре OS Assistant, API, безопасности, проверкам и offline eval.
 
@@ -9,6 +9,8 @@
 ## Содержание
 
 - [Быстрый старт](#быстрый-старт)
+- [Руководство пользователя](USER_GUIDE.md)
+- [Standalone binary, data and releases](#standalone-binary-data-and-releases)
 - [Конфигурация](#конфигурация)
 - [Архитектура](#архитектура)
 - [Сбор и хранение метрик](#сбор-и-хранение-метрик)
@@ -18,32 +20,124 @@
 - [Offline eval и эксперименты](#offline-eval-и-эксперименты)
 - [Учебная модель memory/state](#учебная-модель-memorystate)
 - [Тестирование и проверки](#тестирование-и-проверки)
-- [Карта файлов](#карта-файлов)
 
 ## Быстрый старт
 
 Требования:
 
-- Go 1.27+;
+- Go 1.27.2+;
 - Linux/WSL2 или другая поддерживаемая `gopsutil` платформа;
-- DeepSeek API key — только если нужен AI-запрос.
+- OpenAI-compatible endpoint — только если нужен встроенный AI-запрос. Для локального Ollama, LM Studio или vLLM API key может быть пустым.
 
 Из корня проекта:
 
 ```bash
+# .env не обязателен; создайте его только для удобной локальной конфигурации AI.
+# cp .env.example .env
 go test ./...
 make run
 ```
 
 Откройте `http://127.0.0.1:8080`.
 
-Цель `make run` сначала применяет ожидающие Goose migrations к `CONTEXT_DB_PATH`, затем запускает приложение. Это единственный автоматизированный шаг подготовки локальной dev-БД; само приложение migrations не запускает и таблицы не создаёт.
+Приложение перед созданием store автоматически применяет встроенные Goose migrations к выбранной SQLite-базе. Поэтому `make run` и `go run ./cmd/server` не требуют отдельно установленного Goose CLI. `make tools`, `make db-up` и `make db-status` остаются необязательными диагностическими targets для ручной работы со схемой.
 
-Отдельный read-only MCP-сервер для подключения внешних AI-агентов описан в [TASKMANAGER_MCP.md](TASKMANAGER_MCP.md).
+Встроенный MCP endpoint для внешних AI-агентов читает мониторинговые данные; при
+заданном `SYSTEM_MONITOR_MCP_REPORT_DIR` опциональный `save_diagnostic_report` пишет
+отчёты только в этот каталог. Подробности описаны в разделе ниже.
 
 Для другого пути передайте его в Make явно: `CONTEXT_DB_PATH=/path/to/context.db make run`.
 
-Без `DEEPSEEK_API_KEY` мониторинг и UI продолжают работать, но AI endpoint сообщает, что AI не настроен.
+Если `AI_BASE_URL` или `AI_MODEL` пусты, мониторинг и UI продолжают работать без embedded AI. API-запросы к AI в таком режиме получают понятную ошибку конфигурации. API key не требуется для локальных OpenAI-compatible серверов, которые не используют авторизацию.
+
+## Standalone binary, data and releases
+
+Скачанный binary запускается без repository, Go, Goose CLI и `.env`: frontend и SQL migrations встроены в executable. Распакуйте archive в любой каталог и запустите binary вручную. Приложение не открывает browser автоматически — после запуска откройте `http://127.0.0.1:8080`; встроенный MCP endpoint доступен по `http://127.0.0.1:8080/mcp`. Он читает мониторинговые данные, а при заданном `SYSTEM_MONITOR_MCP_REPORT_DIR` опциональный `save_diagnostic_report` пишет отчёты только в этот каталог.
+
+На первом запуске создаются каталог данных и SQLite database, затем применяются все pending migrations. Повторный запуск безопасен и применяет только новые migrations.
+
+Default database locations:
+
+| OS | Path |
+| --- | --- |
+| Linux | `${XDG_DATA_HOME:-$HOME/.local/share}/system-monitor-ai/system-monitor-context.db` |
+| Windows | `%LOCALAPPDATA%\SystemMonitorAI\system-monitor-context.db` |
+| macOS | `$HOME/Library/Application Support/SystemMonitorAI/system-monitor-context.db` |
+
+`CONTEXT_DB_PATH` всегда имеет приоритет. Он может быть absolute или portable relative path, например `CONTEXT_DB_PATH=./data/system-monitor-context.db`; relative path разрешается относительно current working directory. Чтобы использовать per-user default, не задавайте эту переменную в environment или `.env`.
+
+Существующие базы от предыдущих установок не подхватываются автоматически под новым default path. Чтобы открыть такую базу, задайте `CONTEXT_DB_PATH` на её absolute path и сохраните backup перед запуском.
+
+Release archives публикуются для Linux amd64, Windows amd64, macOS Intel (amd64) и macOS Apple Silicon (arm64). Имена имеют вид:
+
+```text
+system-monitor-ai-<version>-linux-amd64.tar.gz
+system-monitor-ai-<version>-windows-amd64.zip
+system-monitor-ai-<version>-macos-amd64.tar.gz
+system-monitor-ai-<version>-macos-arm64.tar.gz
+```
+
+В командах ниже замените `1.0.0` на версию существующего release tag без
+префикса `v` (например, для tag `v1.0.0` оставьте `VERSION=1.0.0`). Репозиторий
+релизов — `eugesmt/os-resource-monitor-ai`.
+
+Linux amd64:
+
+```bash
+VERSION=1.0.0
+REPO=eugesmt/os-resource-monitor-ai
+ARCHIVE="system-monitor-ai-${VERSION}-linux-amd64.tar.gz"
+BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
+curl -fL -O "${BASE_URL}/${ARCHIVE}"
+curl -fL -O "${BASE_URL}/${ARCHIVE}.sha256"
+sha256sum -c "${ARCHIVE}.sha256"
+INSTALL_DIR="system-monitor-ai-${VERSION}-linux-amd64"
+mkdir -p "$INSTALL_DIR"
+tar -xzf "$ARCHIVE" -C "$INSTALL_DIR"
+chmod +x "$INSTALL_DIR/system-monitor-ai"
+"$INSTALL_DIR/system-monitor-ai"
+```
+
+macOS: выберите `macos-arm64` для Apple Silicon или замените его на
+`macos-amd64` для Intel. На macOS `tar` обычно сохраняет executable bit;
+`chmod +x` ниже — безопасный fallback, если распаковщик его потерял.
+
+```bash
+VERSION=1.0.0
+REPO=eugesmt/os-resource-monitor-ai
+ARCH_SUFFIX=macos-arm64
+ARCHIVE="system-monitor-ai-${VERSION}-${ARCH_SUFFIX}.tar.gz"
+BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
+curl -fL -O "${BASE_URL}/${ARCHIVE}"
+curl -fL -O "${BASE_URL}/${ARCHIVE}.sha256"
+shasum -a 256 -c "${ARCHIVE}.sha256"
+INSTALL_DIR="system-monitor-ai-${VERSION}-${ARCH_SUFFIX}"
+mkdir -p "$INSTALL_DIR"
+tar -xzf "$ARCHIVE" -C "$INSTALL_DIR"
+chmod +x "$INSTALL_DIR/system-monitor-ai"
+"$INSTALL_DIR/system-monitor-ai"
+```
+
+Windows amd64 (PowerShell):
+
+```powershell
+$Version = "1.0.0"
+$Repo = "eugesmt/os-resource-monitor-ai"
+$Archive = "system-monitor-ai-$Version-windows-amd64.zip"
+$BaseUrl = "https://github.com/$Repo/releases/download/v$Version"
+Invoke-WebRequest "$BaseUrl/$Archive" -OutFile $Archive
+Invoke-WebRequest "${BaseUrl}/${Archive}.sha256" -OutFile "${Archive}.sha256"
+$Expected = ((Get-Content "${Archive}.sha256" -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+$Actual = (Get-FileHash $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($Actual -ne $Expected) { throw "SHA-256 mismatch" }
+$InstallDir = "system-monitor-ai-$Version-windows-amd64"
+Expand-Archive -Path $Archive -DestinationPath $InstallDir -Force
+& ".\$InstallDir\system-monitor-ai.exe"
+```
+
+Для upgrade остановите старый process и замените только binary. Пользовательская database остаётся в том же OS data path и переживает замену binary; migrations применятся при следующем запуске. Старые установки из repository могли использовать SQLite database в current directory. Перед переходом сохраните эту database и задайте `CONTEXT_DB_PATH` на её absolute path. Не удаляйте старую database, пока не проверите, что данные доступны.
+
+Linux archive собирается native runner с включённым CGO для optional NVIDIA NVML probe и поэтому динамически зависит от совместимой glibc. На системах без NVIDIA GPU приложение всё равно запускается, но для очень старого Linux distribution может потребоваться более новый glibc или сборка из исходников. Windows и macOS archives не требуют Goose CLI; отсутствие optional NVML runtime не блокирует startup.
 
 ## Конфигурация
 
@@ -54,26 +148,68 @@ ADDR=127.0.0.1:8080
 COLLECTOR_INTERVAL_MS=2000
 HISTORY_SIZE=300
 MAX_PROCESSES=100
-DEEPSEEK_API_KEY=
-CONTEXT_DB_PATH=taskmanager-context.db
+# Optional override; omit it to use the per-user OS default.
+# CONTEXT_DB_PATH=/path/to/context.db
 AI_CONTEXT_TOKEN_BUDGET=8000
-DEEPSEEK_MODEL=deepseek-flash
-DEEPSEEK_BASE_URL=https://api.deepseek.com
+AI_API_KEY=
+AI_BASE_URL=
+AI_MODEL=
+AI_JSON_MODE=true
 ```
 
-Пример находится в `.env.example`. API key используется только backend и не передаётся браузеру.
+Пример находится в `.env.example`. Canonical-переменные `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL` и `AI_JSON_MODE` используются backend и никогда не передаются браузеру. AI считается настроенным, когда заданы `AI_BASE_URL` и `AI_MODEL`; `AI_API_KEY` может быть пустым для локального сервера.
+
+При использовании существующего `.env` задайте `CONTEXT_DB_PATH` явно, если нужно открыть прежнюю database. Для нового per-user OS default не задавайте эту переменную. Относительный путь оставляйте только для portable/local development mode.
+
+Конфигурация выбирает один из двух режимов и не смешивает их:
+
+- **Generic mode** выбирается, если задан хотя бы один из `AI_BASE_URL` или `AI_MODEL`. В этом режиме используются только canonical `AI_*`; значения `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` и `DEEPSEEK_MODEL` (включая старый key-only setup) не подставляются в пропущенные поля. Для включения AI нужны оба `AI_BASE_URL` и `AI_MODEL`, а `AI_API_KEY` может быть пустым для локального сервера.
+- **Legacy mode** используется только если оба `AI_BASE_URL` и `AI_MODEL` пусты. Тогда старые `DEEPSEEK_*` поддерживаются как fallback, включая прежние DeepSeek defaults для key-only конфигурации. Новые установки должны использовать только `AI_*`.
+
+Клиент говорит с endpoint по OpenAI-compatible Chat Completions API. Поддерживаются, например, OpenAI, DeepSeek, Ollama, LM Studio и vLLM:
+
+```bash
+# OpenAI
+AI_API_KEY=sk-...
+AI_BASE_URL=https://api.openai.com/v1
+AI_MODEL=gpt-4o-mini
+AI_JSON_MODE=true
+
+# DeepSeek
+AI_API_KEY=sk-...
+AI_BASE_URL=https://api.deepseek.com
+AI_MODEL=deepseek-chat
+
+# Ollama (локально, ключ обычно не нужен)
+AI_API_KEY=
+AI_BASE_URL=http://127.0.0.1:11434/v1
+AI_MODEL=llama3.1
+
+# LM Studio (локально)
+AI_API_KEY=
+AI_BASE_URL=http://127.0.0.1:1234/v1
+AI_MODEL=local-model
+
+# vLLM (локально или в своей сети)
+AI_API_KEY=
+AI_BASE_URL=http://127.0.0.1:8000/v1
+AI_MODEL=your-served-model
+```
+
+Нативные API Claude и Gemini напрямую не поддерживаются: у них другой протокол. Используйте OpenAI-compatible gateway/adapter (например, настроенный proxy) и укажите его URL и model в `AI_*`.
+
+`AI_JSON_MODE=true` добавляет в запрос `response_format: {"type":"json_object"}`. Включайте его только для provider/model, который поддерживает JSON Mode. Если endpoint не принимает `response_format`, задайте `AI_JSON_MODE=false`: prompt всё равно требует JSON, а строгий parser и semantic validation отклонят malformed или неподтверждённый ответ.
 
 Production prompt не задаётся через environment: он встроен в код и имеет версию `os-assistant.prompt.v1`.
 `AI_CONTEXT_TOKEN_BUDGET` ограничивает оценочный размер input context; default — 8000 tokens. Output reserve остаётся `max_tokens=3000`.
 
-Для запуска напрямую через `go run` сначала явно примените Goose migration к `CONTEXT_DB_PATH`:
+Для запуска из исходников достаточно:
 
 ```bash
-goose -dir migrations sqlite3 taskmanager-context.db status
-goose -dir migrations sqlite3 taskmanager-context.db up
+go run ./cmd/server
 ```
 
-Приложение намеренно не запускает migrations автоматически. Без применённой схемы startup завершается с понятной ошибкой.
+Перед запуском приложение само создаёт parent directory, применяет embedded migrations и проверяет schema. `CONTEXT_DB_PATH` можно задать явно для временной или portable database.
 
 ## Архитектура
 
@@ -101,8 +237,8 @@ flowchart TD
     FRESH --> LOG["Append user event в SQLite"]
     LOG --> CC["ContextCompiler: bounded recent turns"]
     CC --> PR["Versioned PromptRenderer"]
-    PR --> DS["DeepSeek JSON Mode"]
-    DS --> CR["CompletionResult"]
+    PR --> PROVIDER["OpenAI-compatible provider"]
+    PROVIDER --> CR["CompletionResult"]
     CR --> PARSE["Strict JSON parsing"]
     PARSE --> STRUCT["Structural validation"]
     STRUCT --> SEM["Semantic validation по тому же snapshot"]
@@ -128,13 +264,14 @@ Composition root находится в `cmd/server/main.go`. При запуск
 
 1. создаёт structured JSON logger;
 2. загружает `.env`, если файл существует;
-3. получает настройки из `internal/config`;
-4. создаёт collector и потокобезопасный RingBuffer;
-5. создаёт server Runtime и его State;
-6. при наличии `DEEPSEEK_API_KEY` создаёт DeepSeek client и AI Agent;
-7. запускает фоновый collection loop;
-8. регистрирует HTTP API, SSE и встроенный frontend;
-9. останавливает фоновые goroutines при завершении процесса.
+3. получает настройки из `internal/config` и разрешает OS data path;
+4. применяет embedded Goose migrations перед открытием conversation store;
+5. создаёт collector и потокобезопасный RingBuffer;
+6. создаёт server Runtime и его State;
+7. при наличии `AI_BASE_URL` и `AI_MODEL` (или совместимой legacy-конфигурации) создаёт provider-neutral AI client и Agent;
+8. запускает фоновый collection loop;
+9. регистрирует HTTP API, SSE, MCP и встроенный frontend;
+10. останавливает фоновые goroutines при завершении процесса.
 
 ## Сбор и хранение метрик
 
@@ -245,7 +382,7 @@ sequenceDiagram
     participant Agent as AI Agent
     participant Store as SQLite event log
     participant Compiler as ContextCompiler
-    participant DeepSeek
+    participant Provider as OpenAI-compatible provider
     participant Validator
 
     User->>Browser: задаёт вопрос
@@ -257,8 +394,8 @@ sequenceDiagram
     Agent->>Compiler: compile before current event ID
     Compiler->>Store: bounded ListRecentEvents
     Compiler-->>Agent: system + historical roles + current user
-    Agent->>DeepSeek: Chat Completions + JSON Mode
-    DeepSeek-->>Agent: CompletionResult
+    Agent->>Provider: Chat Completions (+ JSON Mode, если включён)
+    Provider-->>Agent: CompletionResult
     Agent->>Validator: strict parse + structure + semantics
     Validator-->>Agent: assistant.v2 response
     Agent->>Store: append validated assistant event
@@ -306,11 +443,11 @@ Prompt также содержит короткие synthetic few-shot examples 
 
 Исторические user/assistant messages передаются в исходных roles, но их content заключается в JSON envelope с `instruction_status=data_only`. System message явно задаёт precedence текущего snapshot и запрещает считать старый assistant JSON текущей истиной. Provider-independent estimator использует UTF-8 bytes, framing overhead и safety margin; это консервативная оценка, а не tokenizer конкретной модели.
 
-### DeepSeek transport
+### Provider-neutral AI transport
 
 Файл: `internal/ai/client.go`.
 
-Provider — DeepSeek через OpenAI-compatible Chat Completions API. Для structured output используется JSON Mode:
+Клиент использует OpenAI-compatible Chat Completions API и не привязан к конкретному provider. Для structured output по умолчанию используется JSON Mode:
 
 ```json
 {
@@ -320,7 +457,7 @@ Provider — DeepSeek через OpenAI-compatible Chat Completions API. Для 
 }
 ```
 
-Provider-enforced JSON Schema не используется. Generation config `deepseek-generation.v2` фиксирует model, `max_tokens=3000`, response format и provider-default sampling/reasoning settings.
+Provider-enforced JSON Schema не используется. Generation config фиксирует model, `max_tokens=3000`, выбранный JSON Mode и provider-default sampling/reasoning settings. Если `AI_JSON_MODE=false`, поле `response_format` не отправляется; strict parsing и semantic validation остаются обязательными.
 
 Client допускает максимум один одновременный provider request и поддерживает cancellation/timeout через `context.Context`.
 
@@ -430,7 +567,12 @@ LLM используется как интерпретатор уже собра
 | `GET` | `/api/snapshot` | последний current snapshot |
 | `GET` | `/api/history?limit=120` | ограниченная UI-история из RingBuffer |
 | `GET` | `/api/events` | SSE-поток новых snapshots |
-| `POST` | `/api/ai/ask` | bounded-context AI response |
+| `POST` | `/api/ai/ask` | запускает bounded-context AI task |
+| `GET` | `/api/ai/task/state` | состояние текущей AI task |
+| `GET` | `/api/ai/task/result` | результат завершённой AI task |
+| `POST` | `/api/ai/task/state` | pause/resume текущей task |
+| `POST` | `/api/ai/task/continue` | продолжает runnable task по `task_id` и `version` |
+| `POST` | `/api/ai/task/cancel` | отменяет текущую task |
 
 `POST /api/ai/ask` принимает:
 
@@ -440,7 +582,88 @@ LLM используется как интерпретатор уже собра
 }
 ```
 
-Успешный ответ содержит `assistant.v2` внутри `answer`.
+Для новой задачи endpoint обычно отвечает `202 Accepted` и возвращает `task_state`; это означает, что AI работает в фоне:
+
+```json
+{
+  "task_state": {
+    "task_id": "...",
+    "phase": "planning",
+    "status": "active",
+    "outcome": "open",
+    "version": 1
+  }
+}
+```
+
+Клиент опрашивает `GET /api/ai/task/state` до `phase=done` и `outcome=completed`, затем получает `GET /api/ai/task/result`. Результат возвращается как `{"content":"..."}`; содержимое — JSON `assistant.v2`, которое UI форматирует безопасно. Если текущая task уже ожидает пользовательский ответ, повторный `POST /api/ai/ask` может вернуть `200` с `answer` и обновлённым `task_state`.
+
+Минимальная последовательность запросов (повторяйте запрос состояния до `phase=done`):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/ai/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Почему система работает медленно?"}'
+# повторять до phase=done и outcome=completed
+curl -sS http://127.0.0.1:8080/api/ai/task/state
+curl -sS http://127.0.0.1:8080/api/ai/task/result
+```
+
+Последний запрос успешен только после завершения task; до этого сервер возвращает `409`.
+
+### Embedded AI и внешний MCP-агент
+
+Это два независимых пути:
+
+1. Embedded AI в web-приложении использует provider-neutral `AI_*` client, текущий snapshot, bounded history и встроенную валидацию. Он **не вызывает MCP tools**.
+2. Внешний MCP-compatible AI agent подключается к встроенному Streamable HTTP endpoint `/mcp`, получает `get_system_overview`, `get_top_processes`, `get_resource_history`, `get_metrics_summary` и, при включённой директории отчётов, `save_diagnostic_report`. Этот агент сам решает, какие tools вызвать, и может сохранить Markdown/JSON отчёт.
+
+```bash
+SYSTEM_MONITOR_MCP_REPORT_DIR="$PWD/reports" \
+make run
+```
+
+MCP использует тот же listener, что и приложение: по умолчанию `http://127.0.0.1:8080/mcp`. Изменение `ADDR` одновременно расширяет поверхность web API и MCP; endpoint не предоставляет authentication/TLS.
+
+MCP работает stateless поверх Streamable HTTP и читает тот же runtime snapshot,
+history и durable metrics, что и приложение; он не делает HTTP self-call. Доступны
+следующие read-only tools:
+
+- `get_system_overview` — текущий snapshot без списка процессов;
+- `get_top_processes` — сортировка по `cpu` или `memory`, `limit` от 1 до 20;
+- `get_resource_history` — `cpu`, `memory`, `load`, `network_receive`,
+  `network_send`, `disk_read` или `disk_write`, до 120 samples; missing sections
+  сообщаются отдельно и не превращаются в нули;
+- `get_metrics_summary` — `last_minutes` от 3 до 10080 либо абсолютный RFC3339
+  диапазон `from`/`to` длительностью от 3 минут до 7 дней;
+- `save_diagnostic_report` — доступен только при заданном
+  `SYSTEM_MONITOR_MCP_REPORT_DIR`, принимает bounded Markdown/JSON и использует
+  только server-generated filenames.
+
+Все tools валидируют входные данные и поддерживают cancellation. MCP не умеет
+исполнять команды, завершать процессы или обращаться к AI history, memory,
+profiles, invariants и task state.
+
+При включённом `SYSTEM_MONITOR_MCP_REPORT_DIR` отчёты доступны как attachments по
+`/reports/<generated-filename>`; directory listing и path traversal запрещены.
+Если `ADDR` wildcard или неоднозначен (например, `:8080` или `0.0.0.0:8080`),
+отчёт сохраняется безопасно, но `download_url` не возвращается.
+
+Для protocol inspection:
+
+```bash
+npx @modelcontextprotocol/inspector --cli \
+  --server-url http://127.0.0.1:8080/mcp \
+  --transport http \
+  --method tools/list
+```
+
+Embedded MCP покрыт in-memory protocol tests и тестом регистрации основного
+handler:
+
+```bash
+go test ./internal/mcpserver ./cmd/server
+```
 
 SSE-доставка неблокирующая: медленный браузер не останавливает collector. Frontend показывает current metrics, историю, per-core CPU, GPU dashboard и AI diagnosis. LLM-текст выводится через `textContent`.
 
@@ -464,7 +687,7 @@ Telemetry реализована через structured JSON logging LLM calls и
 
 ### Назначение
 
-Offline eval — воспроизводимая проверка AI-слоя на искусственных сценариях. В ней DeepSeek не вызывается: deterministic fixture provider возвращает подготовленный ответ, который проходит через production Agent path и grader.
+Offline eval — воспроизводимая проверка AI-слоя на искусственных сценариях. В ней внешний provider не вызывается: deterministic fixture provider возвращает подготовленный ответ, который проходит через production Agent path и grader.
 
 ```mermaid
 flowchart LR
@@ -476,7 +699,7 @@ flowchart LR
     G --> M["Case result и aggregate metrics"]
 ```
 
-Это проверяет контракт, parsing, validators и grader, но не реальное качество или latency DeepSeek.
+Это проверяет контракт, parsing, validators и grader, но не реальное качество или latency выбранной live-модели.
 
 ### Компоненты eval
 
@@ -588,7 +811,7 @@ flowchart TD
 ```json
 {
   "model_version": "offline-fixture",
-  "config_version": "deepseek-generation.v2",
+  "config_version": "openai-compatible-generation.v1",
   "schema_version": "diagnosis.v1",
   "changed_variable": "prompt_version",
   "latency_applicable": false
@@ -599,7 +822,7 @@ flowchart TD
 
 Result JSON содержит manifest, baseline/candidate trials, `candidate_minus_baseline` и `candidate_variance`. Положительная delta означает улучшение для `pass_rate` и recall, но ухудшение для `false_positive_rate`, где меньше — лучше.
 
-Сохранённый result доказывает воспроизводимость runner/grader на fixtures, а не превосходство candidate prompt при работе с DeepSeek.
+Сохранённый result доказывает воспроизводимость runner/grader на fixtures, а не превосходство candidate prompt при работе с live provider.
 
 ### Изменение сценариев и prompt variants
 
@@ -629,7 +852,7 @@ Manifest проверяет разные baseline/candidate versions, подде
 
 ### Ограничения offline eval
 
-Offline eval не отправляет запросы в DeepSeek и не оценивает live model quality, latency, token usage или rate limits. Diagnosis cases используют искусственные snapshots, а source-aware cases — детерминированную искусственную conversation history. Eval не заменяет runtime validation.
+Offline eval не отправляет запросы во внешний provider и не оценивает live model quality, latency, token usage или rate limits. Diagnosis cases используют искусственные snapshots, а source-aware cases — детерминированную искусственную conversation history. Eval не заменяет runtime validation.
 
 Prompt-injection fixture проверяет placement malicious strings внутри untrusted boundary и rejection forbidden claims, но не доказывает абсолютную устойчивость live LLM. Для этого нужен отдельный live-eval runner; в V1 его нет.
 
@@ -646,7 +869,7 @@ Prompt-injection fixture проверяет placement malicious strings внут
 Модель создаёт и отдельно выбирает:
 
 - `short_term` — сообщения текущего диалога;
-- `working` — данные и решения текущей задачи;
+- `working` — данные, ограничения и решения активной conversation/profile scope;
 - `long_term` — профильные предпочтения и устойчивые знания.
 
 В UI каждый слой помечен явно. Повторное включение только `working` показывает,
@@ -654,7 +877,7 @@ Prompt-injection fixture проверяет placement malicious strings внут
 краткосрочной памяти в долговременную. Тесты модели запускаются командой:
 
 ```bash
-GOCACHE=/tmp/taskmanager-go-cache go test ./internal/memory ./internal/server ./internal/ai
+GOCACHE=/tmp/system-monitor-go-cache go test ./internal/memory ./internal/server ./internal/ai
 ```
 
 ## Тестирование и проверки
@@ -662,9 +885,9 @@ GOCACHE=/tmp/taskmanager-go-cache go test ./internal/memory ./internal/server ./
 Рекомендуемый набор:
 
 ```bash
-GOCACHE=/tmp/taskmanager-go-cache go test ./...
-GOCACHE=/tmp/taskmanager-go-cache go vet ./...
-GOCACHE=/tmp/taskmanager-go-cache go test -race ./internal/ai ./internal/collector ./internal/storage ./internal/server
+GOCACHE=/tmp/system-monitor-go-cache go test ./...
+GOCACHE=/tmp/system-monitor-go-cache go vet ./...
+GOCACHE=/tmp/system-monitor-go-cache go test -race ./internal/ai ./internal/collector ./internal/storage ./internal/server
 node --check cmd/server/web/app.js
 node cmd/server/web/web_test.js
 git diff --check
@@ -674,6 +897,6 @@ Collector tests покрывают successful collection, настоящий zer
 
 AI tests покрывают strict parsing, unknown fields, trailing JSON, finish reasons, JSON Mode body, structural/semantic validation и deterministic grader. Также проверяется compile-only Windows collector path.
 
-`staticcheck` и `govulncheck` требуют toolchain, совместимый с module Go 1.27.1. Установленные в исходной среде анализаторы, собранные с Go 1.26, не дали полноценного результата; это не следует трактовать как успешный pass.
+Для актуального toolchain можно отдельно запустить `staticcheck ./...` и `govulncheck ./...`; результаты этих проверок зависят от установленной версии Go и не заменяют тесты проекта.
 
 Перед публикацией eval-изменения проверьте, что manifest совпадает в manifest/result JSON, число trials корректно, report воспроизводится и изменение metrics объяснимо. Credentials, `.env`, production snapshots и реальные пользовательские данные в eval artifacts попадать не должны.

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"taskmanager-ai/internal/collector"
+	"system-monitor-ai/internal/collector"
 )
 
 type workerStore struct {

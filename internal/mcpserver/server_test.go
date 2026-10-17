@@ -15,7 +15,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"taskmanager-ai/internal/taskmanagerapi"
+	"system-monitor-ai/internal/systemmonitorapi"
 )
 
 func TestServerRegistersOnlyExpectedToolsAndSchemas(t *testing.T) {
@@ -275,7 +275,7 @@ func TestStreamableHTTPProtocolCall(t *testing.T) {
 		_, _ = fmt.Fprint(w, snapshotJSON())
 	}))
 	defer apiServer.Close()
-	api, err := taskmanagerapi.NewClientWithHTTPClient(apiServer.URL, apiServer.Client(), 1<<20)
+	api, err := systemmonitorapi.NewClientWithHTTPClient(apiServer.URL, apiServer.Client(), 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +577,7 @@ func connectedServerWithHandlerOptions(t *testing.T, handler http.Handler, optio
 	t.Helper()
 	httpServer := httptest.NewServer(handler)
 	t.Cleanup(httpServer.Close)
-	api, err := taskmanagerapi.NewClientWithHTTPClient(httpServer.URL, httpServer.Client(), 1<<20)
+	api, err := systemmonitorapi.NewClientWithHTTPClient(httpServer.URL, httpServer.Client(), 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}

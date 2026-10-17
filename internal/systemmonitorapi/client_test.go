@@ -1,4 +1,4 @@
-package taskmanagerapi
+package systemmonitorapi
 
 import (
 	"context"
@@ -61,7 +61,7 @@ func TestClientSnapshotAndHistory(t *testing.T) {
 }
 
 func TestClientRejectsInvalidConfiguration(t *testing.T) {
-	for _, baseURL := range []string{"", "file:///tmp/taskmanager", "http://", "http://user@example.com", "http://example.com?token=secret"} {
+	for _, baseURL := range []string{"", "file:///tmp/system-monitor", "http://", "http://user@example.com", "http://example.com?token=secret"} {
 		if _, err := NewClient(baseURL); err == nil {
 			t.Errorf("NewClient(%q) succeeded", baseURL)
 		}

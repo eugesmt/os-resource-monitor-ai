@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"taskmanager-ai/internal/collector"
+	"system-monitor-ai/internal/collector"
 )
 
 const (

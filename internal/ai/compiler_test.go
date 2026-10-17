@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"taskmanager-ai/internal/domain"
+	"system-monitor-ai/internal/domain"
 )
 
 func historyEvent(id int64, turn string, role domain.EventRole, content string) domain.ConversationEvent {

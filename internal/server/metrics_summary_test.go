@@ -9,7 +9,7 @@ import (
 	"testing/fstest"
 	"time"
 
-	"taskmanager-ai/internal/storage"
+	"system-monitor-ai/internal/storage"
 )
 
 func TestParseMetricsSummaryRangeAcceptsRelativeAndAbsoluteModes(t *testing.T) {

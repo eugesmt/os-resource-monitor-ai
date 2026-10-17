@@ -5,9 +5,9 @@ import (
 	"math"
 	"strings"
 
-	"taskmanager-ai/internal/collector"
-	"taskmanager-ai/internal/domain"
-	"taskmanager-ai/internal/invariants"
+	"system-monitor-ai/internal/collector"
+	"system-monitor-ai/internal/domain"
+	"system-monitor-ai/internal/invariants"
 )
 
 func ValidateInvariantResponse(result domain.AssistantResponseV2, active []invariants.Invariant) error {

@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"taskmanager-ai/internal/collector"
-	"taskmanager-ai/internal/domain"
+	"system-monitor-ai/internal/collector"
+	"system-monitor-ai/internal/domain"
 )
 
 const (

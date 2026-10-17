@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"taskmanager-ai/internal/collector"
-	"taskmanager-ai/internal/metrics"
+	"system-monitor-ai/internal/collector"
+	"system-monitor-ai/internal/metrics"
 )
 
 // MetricsStore persists compact collector samples and their fixed-width

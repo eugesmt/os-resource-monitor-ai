@@ -4,19 +4,25 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
-	"taskmanager-ai/internal/ai"
-	"taskmanager-ai/internal/collector"
-	"taskmanager-ai/internal/config"
-	"taskmanager-ai/internal/server"
-	"taskmanager-ai/internal/storage"
+	"system-monitor-ai/internal/ai"
+	"system-monitor-ai/internal/collector"
+	"system-monitor-ai/internal/config"
+	"system-monitor-ai/internal/mcpserver"
+	"system-monitor-ai/internal/metrics"
+	"system-monitor-ai/internal/server"
+	"system-monitor-ai/internal/storage"
 
 	"github.com/joho/godotenv"
 )
@@ -26,19 +32,26 @@ var webFS embed.FS
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if err := godotenv.Load(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		logger.Warn("failed to load .env", "error", err)
 	}
-	cfg := config.Load()
+	cfg, err := config.LoadWithError()
+	if err != nil {
+		logger.Error("configuration unavailable", "error", err)
+		os.Exit(1)
+	}
+	if err := storage.MigrateConversationDB(ctx, cfg.ContextDBPath); err != nil {
+		logger.Error("conversation database migration failed", "error", err, "path", cfg.ContextDBPath)
+		os.Exit(1)
+	}
 	conversationStore, err := storage.NewConversationStore(cfg.ContextDBPath)
 	if err != nil {
 		logger.Error("conversation store unavailable", "error", err, "path", cfg.ContextDBPath)
 		os.Exit(1)
 	}
 	defer conversationStore.Close()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	c := collector.New(cfg.MaxProcesses, logger)
 	runtime := server.NewRuntime(c, storage.NewRingBuffer(cfg.HistorySize), logger)
 	runtime.SetMetricsStore(conversationStore)
@@ -53,8 +66,8 @@ func main() {
 		logger.Error("invariant store unavailable", "error", err)
 		os.Exit(1)
 	}
-	if cfg.AIAPIKey != "" {
-		agent := ai.NewAgent(ai.NewClient(cfg.AIAPIKey, cfg.AIBaseURL, cfg.AIModel), ai.DefaultSystemPrompt, conversationStore, cfg.AIContextTokenBudget)
+	if cfg.AIConfigured {
+		agent := ai.NewAgent(ai.NewClientWithOptions(ai.ClientOptions{APIKey: cfg.AIAPIKey, BaseURL: cfg.AIBaseURL, Model: cfg.AIModel, JSONMode: cfg.AIJSONMode}), ai.DefaultSystemPrompt, conversationStore, cfg.AIContextTokenBudget)
 		agent.SetLogger(logger)
 		runtime.SetAIAgent(agent)
 	}
@@ -67,7 +80,7 @@ func main() {
 		os.Exit(1)
 	}
 	mux := http.NewServeMux()
-	server.RegisterRoutes(mux, runtime, webRoot)
+	registerRoutes(mux, runtime, webRoot, cfg.Addr, systemMonitorMCPReportDirectory())
 	srv := &http.Server{Addr: cfg.Addr, Handler: loggingMiddleware(mux, logger), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 
 	go func() {
@@ -83,6 +96,60 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("server shutdown failed", "error", err)
 	}
+}
+
+func systemMonitorMCPReportDirectory() string {
+	return os.Getenv("SYSTEM_MONITOR_MCP_REPORT_DIR")
+}
+
+func registerRoutes(mux *http.ServeMux, runtime *server.Runtime, webRoot fs.FS, address, reportDirectory string) {
+	server.RegisterRoutes(mux, runtime, webRoot)
+	reportDirectory = strings.TrimSpace(reportDirectory)
+	mcpOptions := []mcpserver.ServerOption{mcpserver.WithReportDirectory(reportDirectory)}
+	if reportDirectory != "" {
+		if baseURL, ok := reportDownloadBaseURL(address); ok {
+			mcpOptions = append(mcpOptions, mcpserver.WithReportDownloadBaseURL(baseURL))
+		}
+		mux.Handle("/reports/", mcpserver.NewReportDownloadHandler(reportDirectory))
+	}
+	mux.Handle("/mcp", mcpserver.NewStreamableHTTPHandler(runtimeDataSource{runtime: runtime}, mcpOptions...))
+}
+
+func reportDownloadBaseURL(address string) (string, bool) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil || host == "" || port == "" {
+		return "", false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		return "", false
+	}
+	u := url.URL{Scheme: "http", Host: net.JoinHostPort(host, port), Path: "/reports"}
+	return u.String(), true
+}
+
+type runtimeDataSource struct {
+	runtime *server.Runtime
+}
+
+func (s runtimeDataSource) Snapshot(ctx context.Context) (collector.SystemSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return collector.SystemSnapshot{}, err
+	}
+	return s.runtime.GetSnapshot()
+}
+
+func (s runtimeDataSource) History(ctx context.Context, samples int) ([]collector.SystemSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if samples < 1 || samples > 120 {
+		return nil, fmt.Errorf("history samples must be between 1 and 120")
+	}
+	return s.runtime.GetHistory(samples), nil
+}
+
+func (s runtimeDataSource) MetricsSummary(ctx context.Context, from, to time.Time) (metrics.Summary, error) {
+	return s.runtime.MetricsSummary(ctx, from, to)
 }
 
 func loggingMiddleware(next http.Handler, logger *slog.Logger) http.Handler {

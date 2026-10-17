@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
 const source = fs.readFileSync(`${__dirname}/app.js`, 'utf8');
+const indexSource = fs.readFileSync(`${__dirname}/index.html`, 'utf8');
 assert.match(source, /profileForm/);
 assert.match(source, /\/api\/ai\/profile/);
 assert.match(source, /\/api\/ai\/profiles/);
@@ -26,6 +27,10 @@ assert.match(source, /version: taskState\.version/);
 assert.match(source, /function taskAcceptsUserInput/);
 assert.match(source, /\$\('question'\)\.disabled = !acceptsInput/);
 assert.match(source, /if \(response\.status === 404\)/);
+assert.match(indexSource, /Настроенный AI provider анализирует текущие системные метрики/);
+assert.match(indexSource, /<title>System Monitor AI<\/title>/);
+assert.match(indexSource, /<div class="brand">System Monitor <span>AI<\/span><\/div>/);
+assert.doesNotMatch(indexSource, /DeepSeek/);
 assert.doesNotMatch(source, /taskAdvanceBtn/);
 assert.doesNotMatch(source, /taskSaveBtn/);
 assert.doesNotMatch(source, /taskResumeBtn/);

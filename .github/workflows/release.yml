@@ -1,0 +1,261 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset_suffix }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            asset_suffix: linux-amd64
+            goos: linux
+            goarch: amd64
+            archive_ext: tar.gz
+          - runner: windows-latest
+            asset_suffix: windows-amd64
+            goos: windows
+            goarch: amd64
+            archive_ext: zip
+          - runner: macos-15-intel
+            asset_suffix: macos-amd64
+            goos: darwin
+            goarch: amd64
+            archive_ext: tar.gz
+          - runner: macos-15
+            asset_suffix: macos-arm64
+            goos: darwin
+            goarch: arm64
+            archive_ext: tar.gz
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache: true
+
+      - name: Build and package Unix binary
+        if: runner.os != 'Windows'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          binary="system-monitor-ai"
+          archive="system-monitor-ai-${version}-${ASSET_SUFFIX}.tar.gz"
+          mkdir -p release-assets/stage
+          go build -trimpath -ldflags="-s -w" -o "release-assets/stage/${binary}" ./cmd/server
+
+          smoke_dir="$(mktemp -d)"
+          smoke_log="${smoke_dir}/server.log"
+          server_pid=""
+          cleanup() {
+            status=$?
+            if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
+              kill "$server_pid" 2>/dev/null || true
+              for _ in {1..50}; do
+                kill -0 "$server_pid" 2>/dev/null || break
+                sleep 0.1
+              done
+              kill -KILL "$server_pid" 2>/dev/null || true
+            fi
+            if [[ -n "$server_pid" ]]; then
+              wait "$server_pid" 2>/dev/null || true
+            fi
+            if [[ "$status" -ne 0 && -f "$smoke_log" ]]; then
+              cat "$smoke_log"
+            fi
+            rm -rf "$smoke_dir"
+            exit "$status"
+          }
+          trap cleanup EXIT
+          port=$((18080 + RANDOM % 1000))
+          smoke_addr="127.0.0.1:${port}"
+          smoke_db="${smoke_dir}/context.db"
+          binary_path="$(pwd)/release-assets/stage/${binary}"
+          (
+            cd "$smoke_dir"
+            exec env ADDR="$smoke_addr" CONTEXT_DB_PATH="$smoke_db" \
+              "$binary_path" >"$smoke_log" 2>&1
+          ) &
+          server_pid=$!
+          healthy=0
+          for _ in {1..30}; do
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              break
+            fi
+            if curl --fail --silent --show-error "http://${smoke_addr}/api/health" >/dev/null; then
+              healthy=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$healthy" -ne 1 ]]; then
+            echo "release binary health probe failed"
+            exit 1
+          fi
+          tar -C release-assets/stage -czf "release-assets/${archive}" "${binary}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd release-assets && sha256sum "${archive}") > "release-assets/${archive}.sha256"
+          else
+            (cd release-assets && shasum -a 256 "${archive}") > "release-assets/${archive}.sha256"
+          fi
+          rm -rf release-assets/stage
+
+      - name: Build and package Windows binary
+        if: runner.os == 'Windows'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          $binary = 'system-monitor-ai.exe'
+          $archive = "system-monitor-ai-$version-$env:ASSET_SUFFIX.zip"
+          New-Item -ItemType Directory -Force -Path 'release-assets/stage' | Out-Null
+          go build -trimpath -ldflags="-s -w" -o "release-assets/stage/$binary" ./cmd/server
+
+          $smokeDir = Join-Path $env:RUNNER_TEMP ("system-monitor-smoke-" + [Guid]::NewGuid().ToString('N'))
+          $smokeLog = Join-Path $smokeDir 'server.log'
+          $smokeErrorLog = Join-Path $smokeDir 'server-error.log'
+          $process = $null
+          $locationPushed = $false
+          try {
+            New-Item -ItemType Directory -Force -Path $smokeDir | Out-Null
+            $port = Get-Random -Minimum 18080 -Maximum 19080
+            $smokeAddr = "127.0.0.1:$port"
+            $smokeDb = Join-Path $smokeDir 'context.db'
+            $binaryPath = (Resolve-Path "release-assets/stage/$binary").Path
+            Push-Location $smokeDir
+            $locationPushed = $true
+            $previousAddr = $env:ADDR
+            $previousDb = $env:CONTEXT_DB_PATH
+            $env:ADDR = $smokeAddr
+            $env:CONTEXT_DB_PATH = $smokeDb
+            try {
+              $process = Start-Process -FilePath $binaryPath -WorkingDirectory $smokeDir -PassThru -RedirectStandardOutput $smokeLog -RedirectStandardError $smokeErrorLog
+            } finally {
+              if ($null -eq $previousAddr) {
+                Remove-Item Env:ADDR -ErrorAction SilentlyContinue
+              } else {
+                $env:ADDR = $previousAddr
+              }
+              if ($null -eq $previousDb) {
+                Remove-Item Env:CONTEXT_DB_PATH -ErrorAction SilentlyContinue
+              } else {
+                $env:CONTEXT_DB_PATH = $previousDb
+              }
+            }
+            $healthy = $false
+            for ($attempt = 1; $attempt -le 30; $attempt++) {
+              if ($process.HasExited) {
+                break
+              }
+              try {
+                $response = Invoke-WebRequest -UseBasicParsing -Uri "http://$smokeAddr/api/health" -TimeoutSec 2
+                if ($response.StatusCode -eq 200) {
+                  $healthy = $true
+                  break
+                }
+              } catch {
+                # The server may still be starting.
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $healthy) {
+              if (Test-Path $smokeLog) {
+                Get-Content $smokeLog
+              }
+              if (Test-Path $smokeErrorLog) {
+                Get-Content $smokeErrorLog
+              }
+              throw 'release binary health probe failed'
+            }
+          } finally {
+            if ($locationPushed) {
+              Pop-Location
+            }
+            if ($null -ne $process -and -not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              $process.WaitForExit(5000)
+            }
+            if (Test-Path $smokeDir) {
+              Remove-Item -Recurse -Force $smokeDir
+            }
+          }
+          Compress-Archive -Path "release-assets/stage/$binary" -DestinationPath "release-assets/$archive"
+          $hash = (Get-FileHash -Algorithm SHA256 "release-assets/$archive").Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("release-assets/$archive.sha256", "$hash  $archive`n", [Text.UTF8Encoding]::new($false))
+          Remove-Item -Recurse -Force 'release-assets/stage'
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.asset_suffix }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify checksums and create checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(release-assets/*.tar.gz release-assets/*.zip)
+          checksums=(release-assets/*.sha256)
+          test "${#archives[@]}" -eq 4
+          test "${#checksums[@]}" -eq 4
+          for checksum in "${checksums[@]}"; do
+            (cd release-assets && sha256sum -c "$(basename "${checksum}")")
+          done
+          LC_ALL=C sort -k2,2 "${checksums[@]}" > release-assets/SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$RELEASE_TAG" \
+            --generate-notes

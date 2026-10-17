@@ -1,4 +1,4 @@
-package taskmanagerapi
+package systemmonitorapi
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"taskmanager-ai/internal/collector"
-	"taskmanager-ai/internal/metrics"
+	"system-monitor-ai/internal/collector"
+	"system-monitor-ai/internal/metrics"
 )
 
 const (
@@ -24,7 +24,7 @@ const (
 	maxSummaryRange    = 7 * 24 * time.Hour
 )
 
-// Client is a bounded, read-only client for the Task Manager HTTP API.
+// Client is a bounded, read-only client for the System Monitor HTTP API.
 type Client struct {
 	baseURL          *url.URL
 	httpClient       *http.Client

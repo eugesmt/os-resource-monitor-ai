@@ -16,15 +16,24 @@ import (
 )
 
 const (
-	GenerationConfigVersion = "deepseek-generation.v2"
+	GenerationConfigVersion = "openai-compatible-generation.v1"
 	DefaultMaxTokens        = 3000
 )
+
+type ClientOptions struct {
+	APIKey    string
+	BaseURL   string
+	Model     string
+	JSONMode  bool
+	MaxTokens int
+}
 
 type GenerationConfig struct {
 	Version        string `json:"config_version"`
 	Model          string `json:"model"`
 	MaxTokens      int    `json:"max_tokens"`
-	ResponseFormat string `json:"response_format"`
+	JSONMode       bool   `json:"json_mode"`
+	ResponseFormat string `json:"response_format,omitempty"`
 	Temperature    string `json:"temperature"`
 	TopP           string `json:"top_p"`
 	Reasoning      string `json:"reasoning"`
@@ -106,16 +115,29 @@ func (c *trackingHTTPClient) Do(request *http.Request) (*http.Response, error) {
 }
 
 func NewClient(apiKey, baseURL, model string) *Client {
-	config := openai.DefaultConfig(apiKey)
-	if baseURL != "" {
-		config.BaseURL = strings.TrimRight(baseURL, "/")
+	return NewClientWithOptions(ClientOptions{APIKey: apiKey, BaseURL: baseURL, Model: model, JSONMode: true})
+}
+
+func NewClientWithOptions(options ClientOptions) *Client {
+	config := openai.DefaultConfig(options.APIKey)
+	if options.BaseURL != "" {
+		config.BaseURL = strings.TrimRight(options.BaseURL, "/")
 	}
+	model := strings.TrimSpace(options.Model)
 	if model == "" {
-		model = "deepseek-flash"
+		model = "default-model"
+	}
+	maxTokens := options.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = DefaultMaxTokens
+	}
+	responseFormat := ""
+	if options.JSONMode {
+		responseFormat = "json_object"
 	}
 	tracker := &usageTracker{}
 	config.HTTPClient = &trackingHTTPClient{delegate: config.HTTPClient, tracker: tracker}
-	return &Client{client: openai.NewClientWithConfig(config), config: GenerationConfig{Version: GenerationConfigVersion, Model: model, MaxTokens: DefaultMaxTokens, ResponseFormat: "json_object", Temperature: "provider-default", TopP: "provider-default", Reasoning: "provider-default"}, sem: make(chan struct{}, 1), usageTracker: tracker}
+	return &Client{client: openai.NewClientWithConfig(config), config: GenerationConfig{Version: GenerationConfigVersion, Model: model, MaxTokens: maxTokens, JSONMode: options.JSONMode, ResponseFormat: responseFormat, Temperature: "provider-default", TopP: "provider-default", Reasoning: "provider-default"}, sem: make(chan struct{}, 1), usageTracker: tracker}
 }
 
 func (c *Client) Config() GenerationConfig { return c.config }
@@ -141,7 +163,11 @@ func (c *Client) Complete(ctx context.Context, request CompletionRequest) (resul
 	if maxTokens <= 0 {
 		maxTokens = c.config.MaxTokens
 	}
-	resp, err := c.client.CreateChatCompletion(requestCtx, openai.ChatCompletionRequest{Model: c.config.Model, Messages: messages, MaxTokens: maxTokens, ResponseFormat: &openai.ChatCompletionResponseFormat{Type: openai.ChatCompletionResponseFormatTypeJSONObject}})
+	completionRequest := openai.ChatCompletionRequest{Model: c.config.Model, Messages: messages, MaxTokens: maxTokens}
+	if c.config.JSONMode {
+		completionRequest.ResponseFormat = &openai.ChatCompletionResponseFormat{Type: openai.ChatCompletionResponseFormatTypeJSONObject}
+	}
+	resp, err := c.client.CreateChatCompletion(requestCtx, completionRequest)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return result, ctx.Err()

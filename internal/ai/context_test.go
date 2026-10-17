@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"taskmanager-ai/internal/collector"
+	"system-monitor-ai/internal/collector"
 )
 
 func TestBuildContextIncludesKeySections(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"slices"
 	"sync"
 
-	"taskmanager-ai/internal/collector"
+	"system-monitor-ai/internal/collector"
 )
 
 type RingBuffer struct {

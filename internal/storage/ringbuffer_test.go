@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"taskmanager-ai/internal/collector"
+	"system-monitor-ai/internal/collector"
 )
 
 func snapshot(ts int64) collector.SystemSnapshot {

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"taskmanager-ai/internal/collector"
-	"taskmanager-ai/internal/storage"
+	"system-monitor-ai/internal/collector"
+	"system-monitor-ai/internal/storage"
 )
 
 type runtimeMetricsStore struct {

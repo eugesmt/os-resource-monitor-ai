@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"taskmanager-ai/internal/ai"
-	"taskmanager-ai/internal/collector"
-	"taskmanager-ai/internal/domain"
-	"taskmanager-ai/internal/invariants"
-	"taskmanager-ai/internal/storage"
+	"system-monitor-ai/internal/ai"
+	"system-monitor-ai/internal/collector"
+	"system-monitor-ai/internal/domain"
+	"system-monitor-ai/internal/invariants"
+	"system-monitor-ai/internal/storage"
 
 	_ "modernc.org/sqlite"
 )

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"taskmanager-ai/internal/collector"
-	"taskmanager-ai/internal/metrics"
+	"system-monitor-ai/internal/collector"
+	"system-monitor-ai/internal/metrics"
 
 	_ "modernc.org/sqlite"
 )

@@ -10,12 +10,19 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"taskmanager-ai/internal/collector"
-	"taskmanager-ai/internal/metrics"
-	"taskmanager-ai/internal/taskmanagerapi"
+	"system-monitor-ai/internal/collector"
+	"system-monitor-ai/internal/metrics"
 )
 
 type EmptyInput struct{}
+
+// DataSource is the read-only monitoring data needed by the MCP tools.
+// Implementations may be backed by the application runtime or its HTTP API.
+type DataSource interface {
+	Snapshot(context.Context) (collector.SystemSnapshot, error)
+	History(context.Context, int) ([]collector.SystemSnapshot, error)
+	MetricsSummary(context.Context, time.Time, time.Time) (metrics.Summary, error)
+}
 
 type TopProcessesInput struct {
 	SortBy string `json:"sort_by" jsonschema:"metric used to rank processes: cpu or memory"`
@@ -91,9 +98,9 @@ const (
 
 // NewStreamableHTTPHandler exposes tools over stateless MCP Streamable HTTP.
 // Authentication and listener policy remain the caller's responsibility; the
-// production command restricts its listener to loopback.
-func NewStreamableHTTPHandler(api *taskmanagerapi.Client, options ...ServerOption) http.Handler {
-	server := NewServer(api, options...)
+// handler does not impose a listener policy.
+func NewStreamableHTTPHandler(source DataSource, options ...ServerOption) http.Handler {
+	server := NewServer(source, options...)
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, &mcp.StreamableHTTPOptions{
@@ -105,23 +112,23 @@ func NewStreamableHTTPHandler(api *taskmanagerapi.Client, options ...ServerOptio
 	return http.NewCrossOriginProtection().Handler(handler)
 }
 
-// NewServer constructs an MCP server backed by the Task Manager API. It remains
+// NewServer constructs an MCP server backed by a read-only data source. It remains
 // read-only unless WithReportDirectory is supplied with a non-empty directory.
-func NewServer(api *taskmanagerapi.Client, options ...ServerOption) *mcp.Server {
+func NewServer(source DataSource, options ...ServerOption) *mcp.Server {
 	config := serverConfig{}
 	for _, option := range options {
 		if option != nil {
 			option(&config)
 		}
 	}
-	server := mcp.NewServer(&mcp.Implementation{Name: "taskmanager-mcp", Version: "v1.0.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "system-monitor-ai-mcp", Version: "v1.0.0"}, nil)
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_system_overview", Description: "Return the current compact operating-system overview", InputSchema: json.RawMessage(emptyInputSchema),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, SystemOverviewOutput, error) {
-		if api == nil {
-			return nil, SystemOverviewOutput{}, fmt.Errorf("Task Manager API client is unavailable")
+		if source == nil {
+			return nil, SystemOverviewOutput{}, fmt.Errorf("MCP data source is unavailable")
 		}
-		snapshot, err := api.Snapshot(ctx)
+		snapshot, err := source.Snapshot(ctx)
 		if err != nil {
 			return nil, SystemOverviewOutput{}, err
 		}
@@ -139,8 +146,8 @@ func NewServer(api *taskmanagerapi.Client, options ...ServerOption) *mcp.Server 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_top_processes", Description: "Return processes using the most CPU or memory", InputSchema: json.RawMessage(topProcessesInputSchema),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input TopProcessesInput) (*mcp.CallToolResult, TopProcessesOutput, error) {
-		if api == nil {
-			return nil, TopProcessesOutput{}, fmt.Errorf("Task Manager API client is unavailable")
+		if source == nil {
+			return nil, TopProcessesOutput{}, fmt.Errorf("MCP data source is unavailable")
 		}
 		if input.SortBy != "cpu" && input.SortBy != "memory" {
 			return nil, TopProcessesOutput{}, fmt.Errorf("sort_by must be cpu or memory")
@@ -148,7 +155,7 @@ func NewServer(api *taskmanagerapi.Client, options ...ServerOption) *mcp.Server 
 		if input.Limit < 1 || input.Limit > 20 {
 			return nil, TopProcessesOutput{}, fmt.Errorf("limit must be between 1 and 20")
 		}
-		snapshot, err := api.Snapshot(ctx)
+		snapshot, err := source.Snapshot(ctx)
 		if err != nil {
 			return nil, TopProcessesOutput{}, err
 		}
@@ -174,8 +181,8 @@ func NewServer(api *taskmanagerapi.Client, options ...ServerOption) *mcp.Server 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_resource_history", Description: "Return a compact time series for a selected system resource metric", InputSchema: json.RawMessage(resourceHistoryInputSchema),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input ResourceHistoryInput) (*mcp.CallToolResult, ResourceHistoryOutput, error) {
-		if api == nil {
-			return nil, ResourceHistoryOutput{}, fmt.Errorf("Task Manager API client is unavailable")
+		if source == nil {
+			return nil, ResourceHistoryOutput{}, fmt.Errorf("MCP data source is unavailable")
 		}
 		section, unit, valueFn, ok := metricSpec(input.Metric)
 		if !ok {
@@ -184,7 +191,7 @@ func NewServer(api *taskmanagerapi.Client, options ...ServerOption) *mcp.Server 
 		if input.Samples < 1 || input.Samples > 120 {
 			return nil, ResourceHistoryOutput{}, fmt.Errorf("samples must be between 1 and 120")
 		}
-		items, err := api.History(ctx, input.Samples)
+		items, err := source.History(ctx, input.Samples)
 		if err != nil {
 			return nil, ResourceHistoryOutput{}, err
 		}
@@ -219,14 +226,14 @@ func NewServer(api *taskmanagerapi.Client, options ...ServerOption) *mcp.Server 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "get_metrics_summary", Description: "Return an aggregate operating-system summary for a relative or absolute time range", InputSchema: json.RawMessage(metricsSummaryInputSchema),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input MetricsSummaryInput) (*mcp.CallToolResult, metrics.Summary, error) {
-		if api == nil {
-			return nil, metrics.Summary{}, fmt.Errorf("Task Manager API client is unavailable")
+		if source == nil {
+			return nil, metrics.Summary{}, fmt.Errorf("MCP data source is unavailable")
 		}
 		from, to, err := resolveMetricsSummaryInput(input, time.Now().UTC())
 		if err != nil {
 			return nil, metrics.Summary{}, err
 		}
-		output, err := api.MetricsSummary(ctx, from, to)
+		output, err := source.MetricsSummary(ctx, from, to)
 		if err != nil {
 			return nil, metrics.Summary{}, err
 		}

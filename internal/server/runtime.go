@@ -10,17 +10,17 @@ import (
 	"sync"
 	"time"
 
-	"taskmanager-ai/internal/ai"
-	"taskmanager-ai/internal/collector"
-	"taskmanager-ai/internal/domain"
-	"taskmanager-ai/internal/invariants"
-	"taskmanager-ai/internal/memory"
-	"taskmanager-ai/internal/metrics"
-	"taskmanager-ai/internal/storage"
+	"system-monitor-ai/internal/ai"
+	"system-monitor-ai/internal/collector"
+	"system-monitor-ai/internal/domain"
+	"system-monitor-ai/internal/invariants"
+	"system-monitor-ai/internal/memory"
+	"system-monitor-ai/internal/metrics"
+	"system-monitor-ai/internal/storage"
 )
 
 var ErrSnapshotNotReady = errors.New("snapshot is not ready")
-var ErrAIUnavailable = errors.New("AI is not configured: set DEEPSEEK_API_KEY")
+var ErrAIUnavailable = errors.New("AI is not configured: set AI_BASE_URL and AI_MODEL (AI_API_KEY is optional for local providers)")
 var ErrTaskAlreadyOpen = errors.New("an open task already exists")
 var ErrTaskNotRunnable = errors.New("task is not runnable")
 

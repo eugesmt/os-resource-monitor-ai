@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"taskmanager-ai/internal/collector"
+	"system-monitor-ai/internal/collector"
 )
 
 const (

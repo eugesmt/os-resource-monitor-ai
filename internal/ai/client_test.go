@@ -20,6 +20,14 @@ func testCompletionRequest() CompletionRequest {
 	}, MaxTokens: DefaultMaxTokens}
 }
 
+func TestNewClientCompatibilityWrapperUsesNeutralDefaults(t *testing.T) {
+	client := NewClient("key", "http://example.com", "")
+	config := client.Config()
+	if config.Model != "default-model" || !config.JSONMode || config.ResponseFormat != "json_object" {
+		t.Fatalf("compatibility client config = %#v", config)
+	}
+}
+
 func TestClientCompleteSendsModelAndMessages(t *testing.T) {
 	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]any
@@ -57,6 +65,28 @@ func TestClientCompleteSendsModelAndMessages(t *testing.T) {
 	}
 	if answer.Content != "answer" || answer.FinishReason != "stop" || !answer.Usage.Available || answer.Usage.TotalTokens != 5 || answer.Latency <= 0 {
 		t.Fatalf("answer = %#v, want stopped answer", answer)
+	}
+}
+
+func TestClientCompleteOmitsResponseFormatWhenJSONModeDisabled(t *testing.T) {
+	server := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if _, ok := request["response_format"]; ok {
+			t.Errorf("response_format = %v, want omitted", request["response_format"])
+		}
+		_, _ = w.Write([]byte(`{"id":"resp-1","model":"local-model","choices":[{"finish_reason":"stop","message":{"content":"answer"}}]}`))
+	}))
+	defer server.Close()
+
+	client := NewClientWithOptions(ClientOptions{APIKey: "", BaseURL: server.URL, Model: "local-model", JSONMode: false})
+	if client.Config().JSONMode || client.Config().ResponseFormat != "" {
+		t.Fatalf("config = %#v, want JSON mode disabled", client.Config())
+	}
+	if _, err := client.Complete(context.Background(), testCompletionRequest()); err != nil {
+		t.Fatalf("Complete() error = %v", err)
 	}
 }
 

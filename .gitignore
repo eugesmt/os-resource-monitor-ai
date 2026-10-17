@@ -30,5 +30,5 @@ AGENTS.md
 
 # Local learning materials
 /docs/
-/taskmanager-context.db*
+/system-monitor-context.db*
 *.db*

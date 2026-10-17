@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"taskmanager-ai/internal/domain"
-	"taskmanager-ai/internal/invariants"
-	"taskmanager-ai/internal/memory"
+	"system-monitor-ai/internal/domain"
+	"system-monitor-ai/internal/invariants"
+	"system-monitor-ai/internal/memory"
 	"uuid"
 
 	_ "modernc.org/sqlite"
