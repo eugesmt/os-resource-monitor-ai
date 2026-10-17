@@ -358,14 +358,9 @@ func TestAskHTTPRejectsMissingTaskDecisionWithoutAdvancingState(t *testing.T) {
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 	}
-	time.Sleep(automaticTaskTurnDelay + 100*time.Millisecond)
-	state, err := store.GetOpenTask(context.Background(), storage.DefaultConversationID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Phase != domain.TaskPhaseExecution || state.ResponseType != domain.ResponseTypeGeneralAnswer {
-		t.Fatalf("state did not advance with the code-owned response type: %#v", state)
-	}
+	waitForTaskState(t, runtime, func(state domain.TaskState) bool {
+		return state.Phase == domain.TaskPhaseExecution && state.ResponseType == domain.ResponseTypeGeneralAnswer
+	})
 	events, err := store.ListEvents(context.Background(), storage.DefaultConversationID)
 	if err != nil {
 		t.Fatal(err)
@@ -373,6 +368,9 @@ func TestAskHTTPRejectsMissingTaskDecisionWithoutAdvancingState(t *testing.T) {
 	if len(events) != 2 || events[0].Role != domain.EventRoleUser || events[1].Role != domain.EventRoleAssistant {
 		t.Fatalf("events = %#v, want user and accepted assistant event", events)
 	}
+	waitForTaskState(t, runtime, func(state domain.TaskState) bool {
+		return state.Phase == domain.TaskPhaseDone
+	})
 }
 
 func TestAutomaticTaskCompletesAfterInvariantConflict(t *testing.T) {
