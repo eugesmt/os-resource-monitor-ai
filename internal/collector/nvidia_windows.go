@@ -28,15 +28,10 @@ type nvidiaWindowsLibrary struct {
 }
 
 func collectNVIDIAGPU() ([]GPUInfo, error) {
-	library := &nvidiaWindowsLibrary{dll: syscall.NewLazyDLL("nvml.dll")}
-	library.init = library.dll.NewProc("nvmlInit_v2")
-	library.shutdown = library.dll.NewProc("nvmlShutdown")
-	library.deviceGetCount = library.dll.NewProc("nvmlDeviceGetCount_v2")
-	library.deviceGetHandle = library.dll.NewProc("nvmlDeviceGetHandleByIndex_v2")
-	library.deviceGetName = library.dll.NewProc("nvmlDeviceGetName")
-	library.deviceGetUtilization = library.dll.NewProc("nvmlDeviceGetUtilizationRates")
-	library.deviceGetMemory = library.dll.NewProc("nvmlDeviceGetMemoryInfo")
-	library.deviceGetTemperature = library.dll.NewProc("nvmlDeviceGetTemperature")
+	library, err := loadNVIDIAWindowsLibrary("nvml.dll")
+	if err != nil {
+		return nil, err
+	}
 
 	if ret, _, err := library.init.Call(); ret != nvmlSuccess {
 		return nil, fmt.Errorf("NVML initialization failed: %d (%v)", ret, err)
@@ -82,4 +77,39 @@ func collectNVIDIAGPU() ([]GPUInfo, error) {
 		return nil, fmt.Errorf("NVIDIA GPU not found")
 	}
 	return result, nil
+}
+
+func loadNVIDIAWindowsLibrary(name string) (*nvidiaWindowsLibrary, error) {
+	dll := syscall.NewLazyDLL(name)
+	if err := dll.Load(); err != nil {
+		return nil, fmt.Errorf("load NVML library: %w", err)
+	}
+	library := &nvidiaWindowsLibrary{dll: dll}
+	library.init = library.dll.NewProc("nvmlInit_v2")
+	library.shutdown = library.dll.NewProc("nvmlShutdown")
+	library.deviceGetCount = library.dll.NewProc("nvmlDeviceGetCount_v2")
+	library.deviceGetHandle = library.dll.NewProc("nvmlDeviceGetHandleByIndex_v2")
+	library.deviceGetName = library.dll.NewProc("nvmlDeviceGetName")
+	library.deviceGetUtilization = library.dll.NewProc("nvmlDeviceGetUtilizationRates")
+	library.deviceGetMemory = library.dll.NewProc("nvmlDeviceGetMemoryInfo")
+	library.deviceGetTemperature = library.dll.NewProc("nvmlDeviceGetTemperature")
+	procs := []struct {
+		name string
+		proc **syscall.LazyProc
+	}{
+		{"nvmlInit_v2", &library.init},
+		{"nvmlShutdown", &library.shutdown},
+		{"nvmlDeviceGetCount_v2", &library.deviceGetCount},
+		{"nvmlDeviceGetHandleByIndex_v2", &library.deviceGetHandle},
+		{"nvmlDeviceGetName", &library.deviceGetName},
+		{"nvmlDeviceGetUtilizationRates", &library.deviceGetUtilization},
+		{"nvmlDeviceGetMemoryInfo", &library.deviceGetMemory},
+		{"nvmlDeviceGetTemperature", &library.deviceGetTemperature},
+	}
+	for _, item := range procs {
+		if err := (*item.proc).Find(); err != nil {
+			return nil, fmt.Errorf("find NVML symbol %s: %w", item.name, err)
+		}
+	}
+	return library, nil
 }
